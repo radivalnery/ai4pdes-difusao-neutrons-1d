@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai4pdes-difusao-neutrons-1d"
+version = "0.1.0"
+description = "Solver 1D de difusao de neutrons inspirado na filosofia AI4PDEs/Neural Physics."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.24",
+    "matplotlib>=3.8",
+    "reportlab>=4.0",
+]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,30 @@
+# Ambientes e segredos
+.env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Saidas temporarias e relatorios gerados
+tmp/
+*.pdf
+*.xlsx
+*.csv
+
+# IDE/sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Arquivos de backup locais
+*backup*.py
+*- backup.py
