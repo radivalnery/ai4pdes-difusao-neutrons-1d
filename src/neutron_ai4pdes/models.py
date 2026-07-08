@@ -1,9 +1,51 @@
-"""Operadores discretos e resolvedor de fonte fixa no espírito AI4PDEs."""
+"""Operadores discretos e resolvedores de fonte fixa.
+
+O termo Neural Physics usado neste projeto não indica treinamento de uma rede
+neural. Ele indica a implementação de operadores numéricos fixos por operações
+típicas de bibliotecas de IA, como convolução, pooling e interpolação.
+"""
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def resolver_tridiagonal_thomas(lower, diag, upper, rhs):
+    """
+    Resolve sistema tridiagonal Ax = rhs pelo método de Thomas.
+
+    lower: tamanho n-1
+    diag: tamanho n
+    upper: tamanho n-1
+    rhs: tamanho n
+    retorna x
+    """
+    a = np.asarray(lower, dtype=float).copy()
+    b = np.asarray(diag, dtype=float).copy()
+    c = np.asarray(upper, dtype=float).copy()
+    d = np.asarray(rhs, dtype=float).copy()
+
+    n = b.size
+    if a.size != n - 1 or c.size != n - 1 or d.size != n:
+        raise ValueError("Dimensões incompatíveis para sistema tridiagonal.")
+
+    eps = 1.0e-14
+    if abs(b[0]) < eps:
+        raise ZeroDivisionError("Pivô nulo ou muito pequeno no método de Thomas.")
+
+    for i in range(1, n):
+        m = a[i - 1] / b[i - 1]
+        b[i] -= m * c[i - 1]
+        d[i] -= m * d[i - 1]
+        if abs(b[i]) < eps:
+            raise ZeroDivisionError("Pivô nulo ou muito pequeno no método de Thomas.")
+
+    x = np.zeros(n, dtype=float)
+    x[-1] = d[-1] / b[-1]
+    for i in range(n - 2, -1, -1):
+        x[i] = (d[i] - c[i] * x[i + 1]) / b[i]
+    return x
 
 
 class OperadorDifusao1D(nn.Module):
@@ -83,6 +125,42 @@ class OperadorDifusao1D(nn.Module):
         else:
             diag[-1] = 2.0 * self.D[-1] / h2 + self.Sigma_a[-1]
         return torch.clamp(diag, min=1.0e-20)
+
+    def matriz_tridiagonal_numpy(self, rhs=None):
+        """Monta lower, diag, upper e rhs pela mesma discretização do operador."""
+        D = self.D.detach().cpu().numpy().astype(float)
+        Sigma_a = self.Sigma_a.detach().cpu().numpy().astype(float)
+        D_half = self.D_half.detach().cpu().numpy().astype(float)
+        n = D.size
+        h2 = self.h * self.h
+
+        lower = np.zeros(n - 1, dtype=float)
+        diag = np.zeros(n, dtype=float)
+        upper = np.zeros(n - 1, dtype=float)
+        rhs_np = np.zeros(n, dtype=float) if rhs is None else np.asarray(rhs, dtype=float).copy()
+
+        for i in range(1, n - 1):
+            lower[i - 1] = -D_half[i - 1] / h2
+            diag[i] = (D_half[i - 1] + D_half[i]) / h2 + Sigma_a[i]
+            upper[i] = -D_half[i] / h2
+
+        if self.cond_esquerda == 'vácuo':
+            diag[0] = 1.0
+            upper[0] = 0.0
+            rhs_np[0] = 0.0
+        elif self.cond_esquerda == 'reflexiva':
+            diag[0] = 2.0 * D[0] / h2 + Sigma_a[0]
+            upper[0] = -2.0 * D[0] / h2
+
+        if self.cond_direita == 'vácuo':
+            diag[-1] = 1.0
+            lower[-1] = 0.0
+            rhs_np[-1] = 0.0
+        elif self.cond_direita == 'reflexiva':
+            lower[-1] = -2.0 * D[-1] / h2
+            diag[-1] = 2.0 * D[-1] / h2 + Sigma_a[-1]
+
+        return lower, diag, upper, rhs_np
 
     def forward(self, phi):
         phi = self._vetor(phi).to(self.D.device).float()
@@ -179,18 +257,19 @@ class SolverFonteFixaUNet1D(nn.Module):
         diag = self.operador_A.diagonal()
         norma_rhs = max(float(torch.linalg.vector_norm(rhs, ord=float('inf')).item()), 1.0)
         ultimo_residuo = float('inf')
+        historico_residuo = []
 
         for it in range(1, max_iter + 1):
             phi = self._suavizar_jacobi(phi, rhs, diag, n_passos=3)
             residuo = rhs - self.operador_A(phi)
             ultimo_residuo = float(torch.linalg.vector_norm(residuo, ord=float('inf')).item())
-            ## imprimir residuo em cada iteração
+            historico_residuo.append(ultimo_residuo / norma_rhs)
             if ultimo_residuo / norma_rhs < tol:
-                return phi, it, ultimo_residuo
+                return phi, it, ultimo_residuo, historico_residuo
 
             correcao = self._correcao_unet(residuo, diag)
             phi = phi + self.amortecimento_unet * correcao
             phi = self.operador_A.aplicar_contorno_fluxo(phi)
             phi = self._suavizar_jacobi(phi, rhs, diag, n_passos=2)
 
-        return phi, max_iter, ultimo_residuo
+        return phi, max_iter, ultimo_residuo, historico_residuo

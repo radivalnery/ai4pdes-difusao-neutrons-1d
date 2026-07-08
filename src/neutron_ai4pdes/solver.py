@@ -6,7 +6,7 @@ import time
 import numpy as np
 import torch
 
-from .models import OperadorDifusao1D, SolverFonteFixaUNet1D
+from .models import OperadorDifusao1D, SolverFonteFixaUNet1D, resolver_tridiagonal_thomas
 from .references import calcular_k_eff_analitico, fluxo_analitico_homogeneo
 
 
@@ -20,7 +20,8 @@ class SolverDifusaoAI4PDEs:
                  tol_k=1e-6, tol_phi=1e-5, max_iter=1000, potencia_nominal=100.0,
                  pontos_interesse=None, progress_callback=None, dispositivo_preferido='auto',
                  omega_fonte=0.75, amortecimento_unet=0.20,
-                 tol_fonte=None, max_iter_fonte=5000):
+                 tol_fonte=None, max_iter_fonte=5000,
+                 metodo_fonte="unet_multigrid", guardar_historicos_fonte=False):
         
         self.L = L
         self.N = N
@@ -39,6 +40,8 @@ class SolverDifusaoAI4PDEs:
         self.amortecimento_unet = float(amortecimento_unet)
         self.tol_fonte = float(tol_phi if tol_fonte is None else tol_fonte)
         self.max_iter_fonte = int(max_iter_fonte)
+        self.metodo_fonte = metodo_fonte
+        self.guardar_historicos_fonte = guardar_historicos_fonte
         
         self.materiais = materiais
         self.D_arr = np.zeros(N+1)
@@ -73,6 +76,8 @@ class SolverDifusaoAI4PDEs:
         self.solver_fonte_fixa = None
         self.iteracoes_fonte_fixa = []
         self.residuos_fonte_fixa = []
+        self.historico_residuo_fonte_ultima_chamada = []
+        self.historicos_residuo_fonte = []
         
         self.k_eff = None
         self.phi = None
@@ -93,6 +98,14 @@ class SolverDifusaoAI4PDEs:
         self.fonte_ref = None
         self.phi_ref = None
         self.is_homogeneo = len(materiais) == 1
+
+    @staticmethod
+    def nome_metodo(metodo):
+        nomes = {
+            "unet_multigrid": "U-Net/multigrid sem treinamento",
+            "thomas": "Thomas clássico",
+        }
+        return nomes.get(metodo, metodo)
 
     def obter_nome_dispositivo(self):
         if self.device.type == 'cuda':
@@ -116,17 +129,18 @@ class SolverDifusaoAI4PDEs:
             amortecimento_unet=self.amortecimento_unet,
         ).to(self.device)
         self.metodo_executado = (
-            "AI4PDEs 1D adaptado - stencil/convolução fixa + multiescala"
+            "Adaptação 1D Neural Physics/AI4PDEs: operadores convolucionais fixos "
+            "e correção multiescala sem treinamento"
         )
     
-    def resolver_sistema(self, S, chute=None):
+    def resolver_fonte_fixa_unet(self, S, chute=None):
         if self.solver_fonte_fixa is None:
-            raise RuntimeError("O solver AI4PDEs 1D ainda não foi criado.")
+            raise RuntimeError("O resolvedor de fonte fixa ainda não foi criado.")
         S_tensor = S.to(self.device).float() if torch.is_tensor(S) else torch.tensor(S, device=self.device, dtype=torch.float32)
         chute_tensor = None
         if chute is not None:
             chute_tensor = chute.to(self.device).float() if torch.is_tensor(chute) else torch.tensor(chute, device=self.device, dtype=torch.float32)
-        phi, n_iter, residuo = self.solver_fonte_fixa.resolver(
+        phi, n_iter, residuo, historico = self.solver_fonte_fixa.resolver(
             S_tensor,
             chute=chute_tensor,
             tol=self.tol_fonte,
@@ -134,7 +148,35 @@ class SolverDifusaoAI4PDEs:
         )
         self.iteracoes_fonte_fixa.append(int(n_iter))
         self.residuos_fonte_fixa.append(float(residuo))
+        self.historico_residuo_fonte_ultima_chamada = list(historico)
+        if self.guardar_historicos_fonte:
+            self.historicos_residuo_fonte.append(list(historico))
         return phi
+
+    def resolver_fonte_fixa_thomas(self, S):
+        if self.modelo_A is None:
+            raise RuntimeError("O operador A ainda não foi criado.")
+        S_np = S.detach().cpu().numpy() if torch.is_tensor(S) else np.asarray(S, dtype=float)
+        lower, diag, upper, rhs = self.modelo_A.matriz_tridiagonal_numpy(S_np)
+        phi_np = resolver_tridiagonal_thomas(lower, diag, upper, rhs)
+        phi_tensor = torch.tensor(phi_np, device=self.device, dtype=torch.float32)
+        residuo_tensor = torch.tensor(rhs, device=self.device, dtype=torch.float32) - self.modelo_A(phi_tensor)
+        residuo = float(torch.linalg.vector_norm(residuo_tensor, ord=float('inf')).item())
+        norma_rhs = max(float(np.linalg.norm(rhs, ord=np.inf)), 1.0)
+        self.iteracoes_fonte_fixa.append(1)
+        self.residuos_fonte_fixa.append(residuo)
+        self.historico_residuo_fonte_ultima_chamada = [residuo / norma_rhs]
+        if self.guardar_historicos_fonte:
+            self.historicos_residuo_fonte.append([residuo / norma_rhs])
+        return phi_tensor
+
+    def resolver_fonte_fixa(self, S, chute=None, metodo=None):
+        metodo = metodo or self.metodo_fonte
+        if metodo == "unet_multigrid":
+            return self.resolver_fonte_fixa_unet(S, chute=chute)
+        if metodo == "thomas":
+            return self.resolver_fonte_fixa_thomas(S)
+        raise ValueError(f"Método de fonte fixa desconhecido: {metodo}")
     
     def calcular_integral(self, f):
         integral = 0.5 * (f[0] + f[-1])
@@ -165,7 +207,9 @@ class SolverDifusaoAI4PDEs:
             return phi * (self.potencia_nominal / P_atual)
         return phi
     
-    def resolver(self):
+    def resolver(self, metodo_fonte=None):
+        if metodo_fonte is not None:
+            self.metodo_fonte = metodo_fonte
         self.criar_operador_A()
         self.calcular_referencias()
         n = self.N + 1
@@ -177,6 +221,12 @@ class SolverDifusaoAI4PDEs:
         self.tempos_iteracao = []
         self.iteracoes_fonte_fixa = []
         self.residuos_fonte_fixa = []
+        self.historico_residuo_fonte_ultima_chamada = []
+        self.historicos_residuo_fonte = []
+        self.convergiu = False
+        self.metodo_executado = (
+            f"{self.nome_metodo(self.metodo_fonte)} aplicado ao problema de fonte fixa"
+        )
         
         print("\n" + "="*60)
         print("SOLVER DE DIFUSÃO DE NÊUTRONS COM AI4PDEs 1D ADAPTADO")
@@ -195,7 +245,7 @@ class SolverDifusaoAI4PDEs:
             inicio_iter = time.perf_counter()
             S = (1.0 / k_eff) * nuSigma_f * phi
             S_tensor = torch.tensor(S, device=self.device, dtype=torch.float32)
-            phi_novo_tensor = self.resolver_sistema(S_tensor, chute=phi)
+            phi_novo_tensor = self.resolver_fonte_fixa(S_tensor, chute=phi, metodo=self.metodo_fonte)
             phi_novo = phi_novo_tensor.cpu().numpy()
             
             integral_novo = self.calcular_integral(nuSigma_f * phi_novo)
@@ -231,13 +281,13 @@ class SolverDifusaoAI4PDEs:
             if erro_k < self.tol_k and erro_phi < self.tol_phi:
                 self.convergiu = True
                 self.iteracoes_totais = iteracao
-                print(f"\n✅ CONVERGÊNCIA ALCANÇADA em {iteracao} iterações!")
+                print(f"\nCONVERGÊNCIA ALCANÇADA em {iteracao} iterações!")
                 print(f"k_eff = {k_eff:.8f}")
                 break
         
         if not self.convergiu:
             self.iteracoes_totais = self.max_iter
-            print(f"\n⚠️ Não convergiu após {self.max_iter} iterações")
+            print(f"\nNão convergiu após {self.max_iter} iterações")
         
         self.tempo_total = time.perf_counter() - tempo_inicio_solver
         self.tempo_medio_iteracao = (
@@ -267,6 +317,61 @@ class SolverDifusaoAI4PDEs:
         )
         self.phi_normalizado = self.normalizar_potencia(phi)
         return k_eff, self.phi_normalizado
+
+    def resumo_resultado(self, caso=None):
+        return {
+            "Caso": caso or ("Homogêneo" if self.is_homogeneo else "Heterogêneo"),
+            "Método": self.nome_metodo(self.metodo_fonte),
+            "N": self.N,
+            "k_eff": self.k_eff,
+            "Referência": self.k_ref,
+            "Erro k (%)": self.erro_k * 100.0 if self.erro_k is not None else None,
+            "Iter. externas": self.iteracoes_totais,
+            "Iter. fonte média": float(np.mean(self.iteracoes_fonte_fixa)) if self.iteracoes_fonte_fixa else 0.0,
+            "Resíduo final": float(self.residuos_fonte_fixa[-1]) if self.residuos_fonte_fixa else None,
+            "Tempo (s)": self.tempo_total,
+        }
+
+
+def executar_comparacao_resolvedores(config_base, metodos=("unet_multigrid", "thomas")):
+    resultados = []
+    solvers = []
+    for metodo in metodos:
+        cfg = dict(config_base)
+        cfg["metodo_fonte"] = metodo
+        solver = SolverDifusaoAI4PDEs(**cfg)
+        solver.resolver()
+        resultados.append(solver.resumo_resultado())
+        solvers.append(solver)
+    return resultados, solvers
+
+
+def executar_sensibilidade(config_base, tol_fonte_values=None, omega_values=None, amortecimento_values=None):
+    tol_fonte_values = tol_fonte_values or [1.0e-4, 1.0e-5, 1.0e-6]
+    omega_values = omega_values or [config_base.get("omega_fonte", 0.75)]
+    amortecimento_values = amortecimento_values or [config_base.get("amortecimento_unet", 0.20)]
+
+    resultados = []
+    for tol_fonte in tol_fonte_values:
+        for omega in omega_values:
+            for amortecimento in amortecimento_values:
+                cfg = dict(config_base)
+                cfg.update({
+                    "metodo_fonte": "unet_multigrid",
+                    "tol_fonte": tol_fonte,
+                    "omega_fonte": omega,
+                    "amortecimento_unet": amortecimento,
+                })
+                solver = SolverDifusaoAI4PDEs(**cfg)
+                solver.resolver()
+                row = solver.resumo_resultado()
+                row.update({
+                    "tol_fonte": tol_fonte,
+                    "omega": omega,
+                    "amortecimento": amortecimento,
+                })
+                resultados.append(row)
+    return resultados
 
 
 # ============================================================================

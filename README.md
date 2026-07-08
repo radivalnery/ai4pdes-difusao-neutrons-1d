@@ -39,6 +39,34 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Versão Única para Envio
+
+Também foi gerado um arquivo único com a versão comparativa para artigo:
+
+```bash
+python difusao_neutrons_neuralphysics_1d_comparativo_v4_0.py
+```
+
+Essa versão inclui:
+
+- resolvedor U-Net/multigrid sem treinamento;
+- método clássico de Thomas;
+- comparação entre resolvedores de fonte fixa;
+- análise de sensibilidade;
+- geração de CSVs e relatórios Markdown/PDF pela interface.
+
+## Gerar Saídas para o Artigo
+
+```bash
+python scripts/generate_enmc_outputs.py
+```
+
+As saídas são gravadas em `outputs/`:
+
+- `resultados_comparacao.csv`;
+- `resultados_sensibilidade.csv`;
+- relatórios comparativos e de sensibilidade em Markdown.
+
 ## Observacao Metodologica
 
 O pacote AI4PDEs original possui recursos voltados principalmente a operadores 2D/3D. Para este problema 1D, o codigo implementa uma adaptacao local da mesma filosofia: operadores discretos fixos, tensores PyTorch e iteracoes sem treinamento.
