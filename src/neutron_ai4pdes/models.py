@@ -14,8 +14,9 @@ from dataclasses import dataclass
 
 @dataclass
 class ResultadoFonteFixa:
+    """Resultado diagnóstico de uma chamada do resolvedor U-Net/multigrid."""
     phi: torch.Tensor
-    n_iter: int
+    iteracoes: int
     residuo: float
     historico_residuo: list
     convergiu: bool
@@ -197,27 +198,66 @@ class OperadorDifusao1D(nn.Module):
         return out
 
 
-class SolverFonteFixaMultiescala1D(nn.Module):
+class SolverFonteFixaUNet1D(nn.Module):
     """
-    Resolve A phi = S com correção multiescala por pooling/interpolação.
+    Resolve A phi = S com um ciclo U-Net/multigrid geométrico 1D.
 
     Não há treinamento. As operações são:
     - aplicação do operador A por stencil/convolução fixa;
     - suavização por Jacobi ponderado;
-    - restrição por AvgPool1d;
+    - restrição full-weighting para malhas grossas;
     - prolongamento por interpolação linear;
-    - correção residual em múltiplas escalas por pooling/interpolação.
+    - operadores rediscretizados em todos os níveis;
+    - solução no nível mais grosso e correção nos níveis finos.
 
-    Este bloco não implementa um V-cycle geométrico completo; ele é um
-    pré-condicionador algorítmico determinístico sem treinamento.
+    Essa é a parte que materializa a filosofia Neural Physics/AI4PDEs no código.
     """
 
-    def __init__(self, operador_A, omega=0.75, amortecimento_unet=0.20):
+    def __init__(self, operador_A, omega=0.75, amortecimento_unet=0.20,
+                 max_niveis=6, min_pontos_grosso=5, pre_suavizacoes=2,
+                 post_suavizacoes=2):
         super().__init__()
         self.operador_A = operador_A
         self.omega = float(omega)
         self.amortecimento_unet = float(amortecimento_unet)
-        self.restricao = nn.AvgPool1d(kernel_size=2, stride=2)
+        self.max_niveis = int(max_niveis)
+        self.min_pontos_grosso = int(min_pontos_grosso)
+        self.pre_suavizacoes = int(pre_suavizacoes)
+        self.post_suavizacoes = int(post_suavizacoes)
+        self.operadores = nn.ModuleList([operador_A])
+        self._construir_hierarquia()
+
+    def _coarsen_array(self, values):
+        """Coarsening nodal por full weighting, preservando as fronteiras."""
+        if values.numel() <= self.min_pontos_grosso:
+            return values
+        coarse_n = (values.numel() - 1) // 2 + 1
+        coarse = torch.empty(coarse_n, device=values.device, dtype=values.dtype)
+        coarse[0] = values[0]
+        coarse[-1] = values[-1]
+        for j in range(1, coarse_n - 1):
+            i = 2 * j
+            coarse[j] = 0.25 * values[i - 1] + 0.50 * values[i] + 0.25 * values[i + 1]
+        return coarse
+
+    def _construir_hierarquia(self):
+        """Cria operadores A_h, A_2h, A_4h, ... por rediscretização geométrica."""
+        atual = self.operador_A
+        for _ in range(1, self.max_niveis):
+            n_fino = atual.D.numel()
+            if n_fino <= self.min_pontos_grosso or n_fino < 2 * self.min_pontos_grosso - 1:
+                break
+            D_c = self._coarsen_array(atual.D).detach().cpu().numpy()
+            Sigma_c = self._coarsen_array(atual.Sigma_a).detach().cpu().numpy()
+            op_c = OperadorDifusao1D(
+                D_c,
+                Sigma_c,
+                atual.h * 2.0,
+                atual.cond_esquerda,
+                atual.cond_direita,
+            ).to(atual.D.device)
+            self.operadores.append(op_c)
+            atual = op_c
 
     def _corrigir_contorno_rhs(self, rhs):
         rhs = rhs.clone()
@@ -229,33 +269,48 @@ class SolverFonteFixaMultiescala1D(nn.Module):
             rhs[-1] = 0.0
         return rhs
 
-    def _suavizar_jacobi(self, phi, rhs, diag, n_passos):
+    def _suavizar_jacobi(self, operador, phi, rhs, diag, n_passos):
         for _ in range(n_passos):
-            residuo = rhs - self.operador_A(phi)
+            residuo = rhs - operador(phi)
             phi = phi + self.omega * residuo / diag
-            phi = self.operador_A.aplicar_contorno_fluxo(phi)
+            phi = operador.aplicar_contorno_fluxo(phi)
         return phi
 
-    def _correcao_unet(self, residuo, diag):
-        n = residuo.numel()
-        r = (residuo / diag).view(1, 1, -1)
-        correcoes = []
+    def _restringir(self, fine):
+        """Restrição full-weighting: I_h^2h r_h."""
+        return self._coarsen_array(fine)
 
-        atual = r
-        for _ in range(3):
-            if atual.shape[-1] < 8:
-                break
-            atual = self.restricao(atual)
-            correcoes.append(atual)
+    def _prolongar(self, coarse, tamanho_fino):
+        """Prolongamento linear: I_2h^h e_2h."""
+        return F.interpolate(
+            coarse.view(1, 1, -1),
+            size=tamanho_fino,
+            mode='linear',
+            align_corners=True,
+        ).view(-1)
 
-        if not correcoes:
-            return torch.zeros(n, device=residuo.device)
+    def _resolver_grosso(self, operador, rhs):
+        lower, diag, upper, rhs_np = operador.matriz_tridiagonal_numpy(rhs.detach().cpu().numpy())
+        sol = resolver_tridiagonal_thomas(lower, diag, upper, rhs_np)
+        return torch.tensor(sol, device=rhs.device, dtype=torch.float32)
 
-        correcao = torch.zeros_like(r)
-        for nivel in reversed(correcoes):
-            up = F.interpolate(nivel, size=n, mode='linear', align_corners=False)
-            correcao = correcao + up
-        return correcao.view(-1)
+    def _ciclo_unet_multigrid(self, nivel, phi, rhs):
+        operador = self.operadores[nivel]
+        diag = operador.diagonal()
+
+        if nivel == len(self.operadores) - 1:
+            return self._resolver_grosso(operador, rhs)
+
+        phi = self._suavizar_jacobi(operador, phi, rhs, diag, self.pre_suavizacoes)
+        residuo = rhs - operador(phi)
+        residuo_grosso = self._restringir(residuo)
+        erro_grosso = torch.zeros_like(residuo_grosso)
+        erro_grosso = self._ciclo_unet_multigrid(nivel + 1, erro_grosso, residuo_grosso)
+        erro_fino = self._prolongar(erro_grosso, phi.numel())
+        phi = phi + self.amortecimento_unet * erro_fino
+        phi = operador.aplicar_contorno_fluxo(phi)
+        phi = self._suavizar_jacobi(operador, phi, rhs, diag, self.post_suavizacoes)
+        return phi
 
     def resolver(self, rhs, chute=None, tol=1.0e-5, max_iter=5000):
         rhs = self._corrigir_contorno_rhs(rhs.float())
@@ -271,20 +326,11 @@ class SolverFonteFixaMultiescala1D(nn.Module):
         historico_residuo = []
 
         for it in range(1, max_iter + 1):
-            phi = self._suavizar_jacobi(phi, rhs, diag, n_passos=3)
+            phi = self._ciclo_unet_multigrid(0, phi, rhs)
             residuo = rhs - self.operador_A(phi)
             ultimo_residuo = float(torch.linalg.vector_norm(residuo, ord=float('inf')).item())
             historico_residuo.append(ultimo_residuo / norma_rhs)
             if ultimo_residuo / norma_rhs < tol:
                 return ResultadoFonteFixa(phi, it, ultimo_residuo, historico_residuo, True)
 
-            correcao = self._correcao_unet(residuo, diag)
-            phi = phi + self.amortecimento_unet * correcao
-            phi = self.operador_A.aplicar_contorno_fluxo(phi)
-            phi = self._suavizar_jacobi(phi, rhs, diag, n_passos=2)
-
         return ResultadoFonteFixa(phi, max_iter, ultimo_residuo, historico_residuo, False)
-
-
-# Alias mantido para compatibilidade com versões anteriores.
-SolverFonteFixaUNet1D = SolverFonteFixaMultiescala1D

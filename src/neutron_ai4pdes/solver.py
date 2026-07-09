@@ -6,7 +6,7 @@ import time
 import numpy as np
 import torch
 
-from .models import OperadorDifusao1D, SolverFonteFixaMultiescala1D, resolver_tridiagonal_thomas
+from .models import OperadorDifusao1D, SolverFonteFixaUNet1D, resolver_tridiagonal_thomas
 from .references import calcular_k_eff_analitico, fluxo_analitico_homogeneo
 
 
@@ -103,7 +103,7 @@ class SolverDifusaoAI4PDEs:
     @staticmethod
     def nome_metodo(metodo):
         nomes = {
-            "unet_multigrid": "Correção multiescala por pooling/interpolação",
+            "unet_multigrid": "U-Net/multigrid sem treinamento",
             "thomas": "Thomas clássico",
         }
         return nomes.get(metodo, metodo)
@@ -124,14 +124,14 @@ class SolverDifusaoAI4PDEs:
             self.cond_esquerda,
             self.cond_direita,
         ).to(self.device)
-        self.solver_fonte_fixa = SolverFonteFixaMultiescala1D(
+        self.solver_fonte_fixa = SolverFonteFixaUNet1D(
             self.modelo_A,
             omega=self.omega_fonte,
             amortecimento_unet=self.amortecimento_unet,
         ).to(self.device)
         self.metodo_executado = (
             "Adaptação 1D Neural Physics/AI4PDEs: operadores convolucionais fixos "
-            "e correção multiescala por pooling/interpolação, sem treinamento"
+            "e ciclo U-Net/multigrid geométrico sem treinamento"
         )
     
     def resolver_fonte_fixa_unet(self, S, chute=None):
@@ -147,13 +147,17 @@ class SolverDifusaoAI4PDEs:
             tol=self.tol_fonte,
             max_iter=self.max_iter_fonte,
         )
-        self.iteracoes_fonte_fixa.append(int(resultado.n_iter))
-        self.residuos_fonte_fixa.append(float(resultado.residuo))
+        phi = resultado.phi
+        n_iter = resultado.iteracoes
+        residuo = resultado.residuo
+        historico = resultado.historico_residuo
+        self.iteracoes_fonte_fixa.append(int(n_iter))
+        self.residuos_fonte_fixa.append(float(residuo))
         self.convergiu_fonte_fixa.append(bool(resultado.convergiu))
-        self.historico_residuo_fonte_ultima_chamada = list(resultado.historico_residuo)
+        self.historico_residuo_fonte_ultima_chamada = list(historico)
         if self.guardar_historicos_fonte:
-            self.historicos_residuo_fonte.append(list(resultado.historico_residuo))
-        return resultado.phi
+            self.historicos_residuo_fonte.append(list(historico))
+        return phi
 
     def resolver_fonte_fixa_thomas(self, S):
         if self.modelo_A is None:
@@ -250,6 +254,15 @@ class SolverDifusaoAI4PDEs:
             S = (1.0 / k_eff) * nuSigma_f * phi
             S_tensor = torch.tensor(S, device=self.device, dtype=torch.float32)
             phi_novo_tensor = self.resolver_fonte_fixa(S_tensor, chute=phi, metodo=self.metodo_fonte)
+            if self.convergiu_fonte_fixa and not self.convergiu_fonte_fixa[-1]:
+                self.iteracoes_totais = iteracao
+                self.convergiu = False
+                print(
+                    "\nFONTE FIXA NÃO CONVERGIU: "
+                    f"atingiu max_iter_fonte={self.max_iter_fonte} na iteração externa {iteracao}. "
+                    "Ajuste tol_fonte, max_fonte, omega ou amortecimento antes de continuar."
+                )
+                break
             phi_novo = phi_novo_tensor.cpu().numpy()
             
             integral_novo = self.calcular_integral(nuSigma_f * phi_novo)
@@ -278,9 +291,10 @@ class SolverDifusaoAI4PDEs:
                 self.progress_callback(iteracao, self.max_iter, k_eff, erro_k, erro_phi)
             
             if iteracao % 10 == 0 or iteracao == 1:
+                status_fonte = "ok" if self.convergiu_fonte_fixa[-1] else "max_iter_fonte"
                 print(f"Iteração {iteracao:4d}: k_eff = {k_eff:.8f}, "
                       f"erro_k = {erro_k:.2e}, erro_phi = {erro_phi:.2e},"
-                      f"Iterações phi: {self.iteracoes_fonte_fixa[-1]}")
+                      f"Iterações phi: {self.iteracoes_fonte_fixa[-1]}, fonte: {status_fonte}")
 
             if erro_k < self.tol_k and erro_phi < self.tol_phi:
                 self.convergiu = True
@@ -290,8 +304,9 @@ class SolverDifusaoAI4PDEs:
                 break
         
         if not self.convergiu:
-            self.iteracoes_totais = self.max_iter
-            print(f"\nNão convergiu após {self.max_iter} iterações")
+            if self.iteracoes_totais <= 0:
+                self.iteracoes_totais = self.max_iter
+            print(f"\nNão convergiu após {self.iteracoes_totais} iterações")
         
         self.tempo_total = time.perf_counter() - tempo_inicio_solver
         self.tempo_medio_iteracao = (
@@ -333,10 +348,10 @@ class SolverDifusaoAI4PDEs:
             "Iter. externas": self.iteracoes_totais,
             "Iter. fonte média": float(np.mean(self.iteracoes_fonte_fixa)) if self.iteracoes_fonte_fixa else 0.0,
             "Resíduo final": float(self.residuos_fonte_fixa[-1]) if self.residuos_fonte_fixa else None,
-            "Tempo (s)": self.tempo_total,
             "Fonte fixa convergiu (todas as chamadas)": bool(self.convergiu_fonte_fixa) and all(self.convergiu_fonte_fixa),
             "Chamadas fonte fixa não convergidas": int(sum(1 for ok in self.convergiu_fonte_fixa if not ok)),
             "Bateu max_iter externo": not self.convergiu,
+            "Tempo (s)": self.tempo_total,
         }
 
 

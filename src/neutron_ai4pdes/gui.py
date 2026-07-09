@@ -17,7 +17,6 @@ from matplotlib.figure import Figure
 
 from .method import METODO_AI4PDES_1D
 from .solver import SolverDifusaoAI4PDEs, executar_sensibilidade
-from relatorios import markdown_tabela, tabela_comparacao
 
 try:
     from reportlab.lib import colors
@@ -351,14 +350,6 @@ class DifusaoGUI_AI4PDEs:
         self.amortecimento_entry.grid(row=row, column=3, padx=3)
         self.amortecimento_entry.insert(0, "0.20")
         row += 1
-
-        self.escalar_tol_fonte_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            self.painel_controles,
-            text="Escalar tol_fonte com 1/N² na tabela",
-            variable=self.escalar_tol_fonte_var,
-        ).grid(row=row, column=0, columnspan=4, sticky=tk.W)
-        row += 1
         
         ttk.Separator(self.painel_controles, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky=tk.W+tk.E, pady=5)
         row += 1
@@ -392,7 +383,7 @@ class DifusaoGUI_AI4PDEs:
 
         self.metodo_label = ttk.Label(
             self.painel_controles,
-            text="Método: operadores convolucionais fixos; correção multiescala sem treinamento"
+            text="Método: operadores convolucionais fixos sem treinamento"
         )
         self.metodo_label.grid(row=row, column=0, columnspan=4, sticky=tk.W, pady=2)
         row += 1
@@ -474,7 +465,7 @@ class DifusaoGUI_AI4PDEs:
 | - Conv1d para o caso homogeneo;                                |
 | - stencil conservativo para o caso heterogeneo;                |
 | - suavizacao de Jacobi;                                        |
-| - restricao e prolongamento em estrutura tipo U-Net/multigrid; |
+| - restricao, prolongamento e ciclo U-Net/multigrid geometrico; |
 | - sem treinamento de pesos.                                    |
 +----------------------------------------------------------------+
 
@@ -617,7 +608,8 @@ class DifusaoGUI_AI4PDEs:
         self.tabela_status.config(text="Tabela limpa")
 
     def montar_colunas_tabela(self):
-        return ('N', 'x', 'k_eff', 'Iterações', 'Erro_k (%)', 'Fluxo', 'Erro fluxo', 'Tempo (s)')
+        return ('N', 'x', 'k_eff', 'Iterações', 'Erro_k (%)', 'Fluxo',
+                'Erro fluxo', 'Fonte conv.', 'Falhas fonte', 'Tempo (s)')
 
     def configurar_colunas_tabela(self):
         colunas = self.montar_colunas_tabela()
@@ -625,7 +617,7 @@ class DifusaoGUI_AI4PDEs:
         for col in colunas:
             self.tree.heading(col, text=col)
             largura = 105
-            if col in ("Fluxo", "Erro fluxo", "Tempo (s)"):
+            if col in ("Fluxo", "Erro fluxo", "Tempo (s)", "Falhas fonte"):
                 largura = 120
             elif col == "x":
                 largura = 80
@@ -654,6 +646,8 @@ class DifusaoGUI_AI4PDEs:
                 f"{(resultado['erro_k'] * 100 if resultado['erro_k'] is not None else 0.0):.4e}",
                 f"{fluxos.get(ponto, 0.0):.6e}",
                 f"{erro_fluxo:.4e}" if erro_fluxo is not None else "N/A",
+                "sim" if resultado.get('fonte_fixa_convergiu', True) else "não",
+                str(resultado.get('chamadas_fonte_nao_convergidas', 0)),
                 f"{resultado.get('tempo_total', 0.0):.4f}",
             ))
         return linhas
@@ -962,8 +956,6 @@ class DifusaoGUI_AI4PDEs:
             metodo_tabela = self.metodo_fonte_var.get()
             if metodo_tabela == "ambos":
                 metodo_tabela = "unet_multigrid"
-            escalar_tol_fonte = self.escalar_tol_fonte_var.get()
-            N_ref_tol = min(N_list) if N_list else 1
             if not pontos:
                 messagebox.showwarning("Aviso", "Informe pelo menos um ponto para a tabela.")
                 return
@@ -992,12 +984,6 @@ class DifusaoGUI_AI4PDEs:
                 
                 for N in N_list:
                     self.root.after(0, lambda n=N: self.tabela_status.config(text=f"Processando N={n}..."))
-                    # Em estudos de convergência espacial, a tolerância do
-                    # resolvedor interno precisa ficar mais rigorosa quando N
-                    # cresce; caso contrário, o erro iterativo domina o erro de
-                    # discretização e a curva de refinamento pode deixar de ser
-                    # monotônica.
-                    tol_fonte_N = tol_fonte * (N_ref_tol / N) ** 2 if escalar_tol_fonte else tol_fonte
                     
                     solver = SolverDifusaoAI4PDEs(
                         L=L, N=N, materiais=materiais,
@@ -1007,7 +993,7 @@ class DifusaoGUI_AI4PDEs:
                         dispositivo_preferido='auto',
                         omega_fonte=omega_fonte,
                         amortecimento_unet=amortecimento_unet,
-                        tol_fonte=tol_fonte_N,
+                        tol_fonte=tol_fonte,
                         max_iter_fonte=max_iter_fonte,
                         metodo_fonte=metodo_tabela
                     )
@@ -1021,7 +1007,6 @@ class DifusaoGUI_AI4PDEs:
                         'erro_k': solver.erro_k,
                         'fluxos_pontos': fluxos_pontos,
                         'erro_fluxo_iterativo': solver.erro_phi_iterativo,
-                        'tol_fonte_usada': tol_fonte_N,
                         'fonte_fixa_convergiu': bool(solver.convergiu_fonte_fixa) and all(solver.convergiu_fonte_fixa),
                         'chamadas_fonte_nao_convergidas': int(sum(1 for ok in solver.convergiu_fonte_fixa if not ok)),
                         'bateu_max_iter_externo': not solver.convergiu,
@@ -1167,15 +1152,12 @@ class DifusaoGUI_AI4PDEs:
         if self.solver.iteracoes_fonte_fixa:
             texto += f"Iter. médias fonte fixa: {np.mean(self.solver.iteracoes_fonte_fixa):.1f}\n"
             texto += f"Último resíduo fonte fixa: {self.solver.residuos_fonte_fixa[-1]:.3e}\n"
-            n_falhas_fonte = sum(1 for ok in self.solver.convergiu_fonte_fixa if not ok)
-            if n_falhas_fonte:
-                texto += f"AVISO: {n_falhas_fonte} chamada(s) da fonte fixa não convergiram.\n"
             texto += f"10 iterações {self.solver.iteracoes_fonte_fixa[0:10]} (últimas 10)\n"
         texto += f"Método: {self.solver.metodo_executado}\n"
         
         self.texto_resultados.delete(1.0, tk.END)
         self.texto_resultados.insert(tk.END, texto)
-    
+
     def gerar_relatorio(self):
         if self.solver is None or self.solver.phi is None:
             messagebox.showerror("Erro", "Execute o solver primeiro.")
@@ -1365,8 +1347,8 @@ class DifusaoGUI_AI4PDEs:
             ))
             story.append(Paragraph(
                 "O problema de fonte fixa Aφ = S é tratado por aplicação do operador A por stencil/Conv1d, "
-                "suavização iterativa de Jacobi, restrição por AvgPool1d e prolongamento por interpolação "
-                "linear em uma estrutura do tipo U-Net/multigrid.",
+                "suavização iterativa de Jacobi, restrição full-weighting, prolongamento por interpolação "
+                "linear e operadores rediscretizados em um ciclo U-Net/multigrid geométrico.",
                 styles['Normal']
             ))
             story.append(Paragraph(
@@ -1428,11 +1410,15 @@ class DifusaoGUI_AI4PDEs:
                     f"Último resíduo de fonte fixa: {self.solver.residuos_fonte_fixa[-1]:.3e}",
                     styles['Normal']
                 ))
-                n_falhas_fonte = sum(1 for ok in self.solver.convergiu_fonte_fixa if not ok)
+                n_falhas_fonte = int(sum(1 for ok in self.solver.convergiu_fonte_fixa if not ok))
+                story.append(Paragraph(
+                    f"Fonte fixa convergiu em todas as chamadas: {'sim' if n_falhas_fonte == 0 else 'não'}",
+                    styles['Normal']
+                ))
                 if n_falhas_fonte:
                     story.append(Paragraph(
-                        f"<b>Aviso:</b> {n_falhas_fonte} chamada(s) do resolvedor de fonte fixa não convergiram "
-                        f"em {self.solver.max_iter_fonte} iterações; o resultado pode não refletir a tolerância solicitada.",
+                        f"<b>Aviso:</b> {n_falhas_fonte} chamada(s) do resolvedor U-Net/multigrid "
+                        f"atingiram max_iter_fonte={self.solver.max_iter_fonte} antes da tolerância.",
                         styles['Normal']
                     ))
             story.append(Spacer(1, 12))
@@ -1440,7 +1426,9 @@ class DifusaoGUI_AI4PDEs:
             if self.resultados_comparacao:
                 story.append(Spacer(1, 12))
                 story.append(Paragraph("4.1 Comparação entre resolvedores de fonte fixa", styles['Heading2']))
-                cab = ["Caso", "Método", "N", "k_eff", "Referência", "Erro k (%)", "Iter. externas", "Iter. fonte média", "Resíduo final", "Fonte convergiu", "Tempo (s)"]
+                cab = ["Caso", "Método", "N", "k_eff", "Referência", "Erro k (%)",
+                       "Iter. externas", "Iter. fonte média", "Resíduo final",
+                       "Fonte conv.", "Falhas fonte", "Tempo (s)"]
                 dados_cmp = [cab]
                 for r in self.resultados_comparacao:
                     dados_cmp.append([
@@ -1449,7 +1437,8 @@ class DifusaoGUI_AI4PDEs:
                         f"{r['Erro k (%)']:.4e}" if r["Erro k (%)"] is not None else "N/A",
                         str(r["Iter. externas"]), f"{r['Iter. fonte média']:.2f}",
                         f"{r['Resíduo final']:.3e}" if r["Resíduo final"] is not None else "N/A",
-                        "sim" if r.get("Fonte fixa convergiu (todas as chamadas)") else "não",
+                        "sim" if r.get("Fonte fixa convergiu (todas as chamadas)", True) else "não",
+                        str(r.get("Chamadas fonte fixa não convergidas", 0)),
                         f"{r['Tempo (s)']:.4f}",
                     ])
                 story.append(estilo_tabela(Table(dados_cmp)))
@@ -1507,7 +1496,8 @@ class DifusaoGUI_AI4PDEs:
             story.append(Spacer(1, 20))
             story.append(Paragraph("8. Resultados para Diferentes Malhas (N)", styles['Heading2']))
             if self.resultados_tabela:
-                cabecalho = ["N", "x", "k_eff", "Iterações", "Erro_k (%)", "Fluxo", "Erro fluxo", "Tempo (s)"]
+                cabecalho = ["N", "x", "k_eff", "Iterações", "Erro_k (%)", "Fluxo",
+                             "Erro fluxo", "Fonte conv.", "Falhas", "Tempo (s)"]
                 dados_tabela = [cabecalho]
                 for r in self.resultados_tabela:
                     fluxos = r.get('fluxos_pontos', {})
@@ -1522,9 +1512,12 @@ class DifusaoGUI_AI4PDEs:
                             f"{r['erro_k']*100:.4e}" if r['erro_k'] else "—",
                             f"{fluxos.get(ponto, 0.0):.6e}",
                             f"{erro_fluxo:.4e}" if erro_fluxo is not None else "N/A",
+                            "sim" if r.get('fonte_fixa_convergiu', True) else "não",
+                            str(r.get('chamadas_fonte_nao_convergidas', 0)),
                             f"{r.get('tempo_total', 0.0):.4f}",
                         ])
-                col_widths = [0.8*cm, 0.8*cm, 2.1*cm, 1.4*cm, 1.7*cm, 2.2*cm, 1.9*cm, 1.6*cm]
+                col_widths = [0.7*cm, 0.7*cm, 1.8*cm, 1.2*cm, 1.5*cm,
+                              1.9*cm, 1.6*cm, 1.3*cm, 1.0*cm, 1.4*cm]
                 story.append(estilo_tabela(Table(
                     dados_tabela,
                     colWidths=col_widths
@@ -1549,7 +1542,9 @@ class DifusaoGUI_AI4PDEs:
             if self.resultados_sensibilidade:
                 story.append(PageBreak())
                 story.append(Paragraph("9. Análise de Sensibilidade", styles['Heading2']))
-                cab = ["Caso", "tol_fonte", "omega", "amort.", "k_eff", "Erro k (%)", "Iter. externas", "Iter. fonte média", "Resíduo final", "Fonte convergiu", "Tempo (s)"]
+                cab = ["Caso", "tol_fonte", "omega", "amort.", "k_eff", "Erro k (%)",
+                       "Iter. externas", "Iter. fonte média", "Resíduo final",
+                       "Fonte conv.", "Falhas fonte", "Tempo (s)"]
                 dados_sens = [cab]
                 for r in self.resultados_sensibilidade:
                     dados_sens.append([
@@ -1558,7 +1553,8 @@ class DifusaoGUI_AI4PDEs:
                         f"{r['Erro k (%)']:.4e}" if r["Erro k (%)"] is not None else "N/A",
                         str(r["Iter. externas"]), f"{r['Iter. fonte média']:.2f}",
                         f"{r['Resíduo final']:.3e}" if r["Resíduo final"] is not None else "N/A",
-                        "sim" if r.get("Fonte fixa convergiu (todas as chamadas)") else "não",
+                        "sim" if r.get("Fonte fixa convergiu (todas as chamadas)", True) else "não",
+                        str(r.get("Chamadas fonte fixa não convergidas", 0)),
                         f"{r['Tempo (s)']:.4f}",
                     ])
                 story.append(estilo_tabela(Table(dados_sens)))
@@ -1624,7 +1620,9 @@ class DifusaoGUI_AI4PDEs:
             f"- Iterações externas: {self.solver.iteracoes_totais}",
             f"- Iterações médias fonte fixa: {np.mean(self.solver.iteracoes_fonte_fixa):.2f}" if self.solver.iteracoes_fonte_fixa else "- Iterações médias fonte fixa: N/A",
             f"- Resíduo final: {self.solver.residuos_fonte_fixa[-1]:.3e}" if self.solver.residuos_fonte_fixa else "- Resíduo final: N/A",
+            f"- Fonte fixa convergiu em todas as chamadas: {'sim' if self.solver.convergiu_fonte_fixa and all(self.solver.convergiu_fonte_fixa) else 'não'}",
             f"- Chamadas de fonte fixa não convergidas: {sum(1 for ok in self.solver.convergiu_fonte_fixa if not ok)}",
+            f"- Bateu max_iter externo: {'sim' if not self.solver.convergiu else 'não'}",
             f"- Tempo total (s): {self.solver.tempo_total:.6f}",
             "",
         ]
@@ -1632,15 +1630,26 @@ class DifusaoGUI_AI4PDEs:
             linhas.extend([
                 "## Comparação entre resolvedores de fonte fixa",
                 "",
-                markdown_tabela(tabela_comparacao(self.resultados_comparacao)),
+                "| Caso | Método | N | k_eff | Referência | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Fonte conv. | Falhas fonte | Tempo (s) |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ])
+            for r in self.resultados_comparacao:
+                linhas.append(
+                    f"| {r['Caso']} | {r['Método']} | {r['N']} | {r['k_eff']:.8f} | "
+                    f"{r['Referência'] if r['Referência'] else 'N/A'} | "
+                    f"{r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
+                    f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
+                    f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | "
+                    f"{r.get('Fonte fixa convergiu (todas as chamadas)', True)} | "
+                    f"{r.get('Chamadas fonte fixa não convergidas', 0)} | {r['Tempo (s)']:.4f} |"
+                )
         if self.resultados_sensibilidade:
             linhas.extend([
                 "",
                 "## Análise de sensibilidade",
                 "",
-                "| Caso | tol_fonte | omega | amortecimento | k_eff | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Fonte convergiu | Tempo (s) |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                "| Caso | tol_fonte | omega | amortecimento | k_eff | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Fonte conv. | Falhas fonte | Tempo (s) |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ])
             for r in self.resultados_sensibilidade:
                 linhas.append(
@@ -1648,7 +1657,8 @@ class DifusaoGUI_AI4PDEs:
                     f"{r['k_eff']:.8f} | {r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
                     f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
                     f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | "
-                    f"{r.get('Fonte fixa convergiu (todas as chamadas)')} | {r['Tempo (s)']:.4f} |"
+                    f"{r.get('Fonte fixa convergiu (todas as chamadas)', True)} | "
+                    f"{r.get('Chamadas fonte fixa não convergidas', 0)} | {r['Tempo (s)']:.4f} |"
                 )
         linhas.extend([
             "",

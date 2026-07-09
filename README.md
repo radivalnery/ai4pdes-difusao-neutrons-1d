@@ -67,19 +67,6 @@ As saídas são gravadas em `outputs/`:
 - `resultados_sensibilidade.csv`;
 - relatórios comparativos e de sensibilidade em Markdown.
 
-## Testes
-
-```bash
-pytest tests/test_solver.py
-```
-
-Os casos completos de regressão estão marcados como `slow` porque reproduzem
-as configurações do artigo. Para rodar apenas os testes rápidos:
-
-```bash
-pytest tests/test_solver.py -m "not slow"
-```
-
 ## Observacao Metodologica
 
 O pacote AI4PDEs original possui recursos voltados principalmente a operadores 2D/3D. Para este problema 1D, o codigo implementa uma adaptacao local da mesma filosofia: operadores discretos fixos, tensores PyTorch e iteracoes sem treinamento.

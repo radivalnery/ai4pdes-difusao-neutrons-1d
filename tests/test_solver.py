@@ -54,20 +54,20 @@ def cfg_heterogeneo(N=300, max_iter=1000, max_iter_fonte=5000):
 
 
 @pytest.mark.slow
-def test_homogeneo_regressao_keff():
+def test_homogeneo_regressao_keff_unet_multigrid():
     solver = SolverDifusaoAI4PDEs(**cfg_homogeneo(), metodo_fonte="unet_multigrid")
     solver.resolver()
     assert abs(solver.k_eff - 0.99724257) < 1e-5
 
 
 @pytest.mark.slow
-def test_heterogeneo_regressao_keff():
+def test_heterogeneo_regressao_keff_unet_multigrid():
     solver = SolverDifusaoAI4PDEs(**cfg_heterogeneo(), metodo_fonte="unet_multigrid")
     solver.resolver()
     assert abs(solver.k_eff - 1.09508219) < 1e-5
 
 
-def test_unet_e_thomas_keff_proximos():
+def test_unet_multigrid_e_thomas_keff_proximos():
     cfg = cfg_homogeneo(N=30, max_iter=80, max_iter_fonte=800)
     unet = SolverDifusaoAI4PDEs(**cfg, metodo_fonte="unet_multigrid")
     thomas = SolverDifusaoAI4PDEs(**cfg, metodo_fonte="thomas")
@@ -85,3 +85,4 @@ def test_fonte_fixa_reporta_nao_convergencia_com_limite_baixo():
     assert any(not ok for ok in solver.convergiu_fonte_fixa)
     resumo = solver.resumo_resultado()
     assert resumo["Fonte fixa convergiu (todas as chamadas)"] is False
+    assert resumo["Chamadas fonte fixa não convergidas"] > 0

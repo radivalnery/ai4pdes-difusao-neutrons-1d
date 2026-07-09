@@ -44,8 +44,8 @@ def escrever_markdown(path, titulo, comparacao, sensibilidade):
         "",
         "## Comparação entre resolvedores de fonte fixa",
         "",
-        "| Caso | Método | N | k_eff | Referência | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Fonte convergiu | Tempo (s) |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Caso | Método | N | k_eff | Referência | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Tempo (s) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in comparacao:
         linhas.append(
@@ -53,23 +53,21 @@ def escrever_markdown(path, titulo, comparacao, sensibilidade):
             f"{r['Referência'] if r['Referência'] else 'N/A'} | "
             f"{r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
             f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
-            f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | "
-            f"{r.get('Fonte fixa convergiu (todas as chamadas)')} | {r['Tempo (s)']:.4f} |"
+            f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | {r['Tempo (s)']:.4f} |"
         )
     linhas.extend([
         "",
         "## Análise de sensibilidade",
         "",
-        "| Caso | tol_fonte | omega | amortecimento | k_eff | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Fonte convergiu | Tempo (s) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Caso | tol_fonte | omega | amortecimento | k_eff | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Tempo (s) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for r in sensibilidade:
         linhas.append(
             f"| {r['Caso']} | {r['tol_fonte']:.1e} | {r['omega']:.2f} | {r['amortecimento']:.2f} | "
             f"{r['k_eff']:.8f} | {r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
             f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
-            f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | "
-            f"{r.get('Fonte fixa convergiu (todas as chamadas)')} | {r['Tempo (s)']:.4f} |"
+            f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | {r['Tempo (s)']:.4f} |"
         )
     linhas.extend([
         "",
