@@ -58,6 +58,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -88,12 +89,13 @@ except ImportError:
             SRC / "solver.py",
             ["import platform", "import time", "import numpy", "import torch", "from ."],
         ),
+        strip_module(ROOT / "relatorios.py", []),
         strip_module(
             SRC / "gui.py",
             [
                 "import csv", "import os", "import platform", "import tempfile", "import threading",
                 "import time", "from datetime", "import numpy", "import torch", "import tkinter",
-                "from tkinter", "from matplotlib", "from .", "try:", "    from reportlab",
+                "from tkinter", "from matplotlib", "from .", "from relatorios", "try:", "    from reportlab",
                 "    REPORTLAB_AVAILABLE", "except ImportError:", "    REPORTLAB_AVAILABLE",
             ],
         ),

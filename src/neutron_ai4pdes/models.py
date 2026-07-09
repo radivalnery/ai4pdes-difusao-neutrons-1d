@@ -9,6 +9,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
+
+
+@dataclass
+class ResultadoFonteFixa:
+    phi: torch.Tensor
+    n_iter: int
+    residuo: float
+    historico_residuo: list
+    convergiu: bool
 
 
 def resolver_tridiagonal_thomas(lower, diag, upper, rhs):
@@ -187,18 +197,19 @@ class OperadorDifusao1D(nn.Module):
         return out
 
 
-class SolverFonteFixaUNet1D(nn.Module):
+class SolverFonteFixaMultiescala1D(nn.Module):
     """
-    Resolve A phi = S com uma arquitetura algorítmica inspirada em U-Net/multigrid.
+    Resolve A phi = S com correção multiescala por pooling/interpolação.
 
     Não há treinamento. As operações são:
     - aplicação do operador A por stencil/convolução fixa;
     - suavização por Jacobi ponderado;
     - restrição por AvgPool1d;
     - prolongamento por interpolação linear;
-    - correção residual em múltiplas escalas.
+    - correção residual em múltiplas escalas por pooling/interpolação.
 
-    Essa é a parte que materializa a filosofia Neural Physics/AI4PDEs no código.
+    Este bloco não implementa um V-cycle geométrico completo; ele é um
+    pré-condicionador algorítmico determinístico sem treinamento.
     """
 
     def __init__(self, operador_A, omega=0.75, amortecimento_unet=0.20):
@@ -265,11 +276,15 @@ class SolverFonteFixaUNet1D(nn.Module):
             ultimo_residuo = float(torch.linalg.vector_norm(residuo, ord=float('inf')).item())
             historico_residuo.append(ultimo_residuo / norma_rhs)
             if ultimo_residuo / norma_rhs < tol:
-                return phi, it, ultimo_residuo, historico_residuo
+                return ResultadoFonteFixa(phi, it, ultimo_residuo, historico_residuo, True)
 
             correcao = self._correcao_unet(residuo, diag)
             phi = phi + self.amortecimento_unet * correcao
             phi = self.operador_A.aplicar_contorno_fluxo(phi)
             phi = self._suavizar_jacobi(phi, rhs, diag, n_passos=2)
 
-        return phi, max_iter, ultimo_residuo, historico_residuo
+        return ResultadoFonteFixa(phi, max_iter, ultimo_residuo, historico_residuo, False)
+
+
+# Alias mantido para compatibilidade com versões anteriores.
+SolverFonteFixaUNet1D = SolverFonteFixaMultiescala1D

@@ -6,7 +6,7 @@ import time
 import numpy as np
 import torch
 
-from .models import OperadorDifusao1D, SolverFonteFixaUNet1D, resolver_tridiagonal_thomas
+from .models import OperadorDifusao1D, SolverFonteFixaMultiescala1D, resolver_tridiagonal_thomas
 from .references import calcular_k_eff_analitico, fluxo_analitico_homogeneo
 
 
@@ -76,6 +76,7 @@ class SolverDifusaoAI4PDEs:
         self.solver_fonte_fixa = None
         self.iteracoes_fonte_fixa = []
         self.residuos_fonte_fixa = []
+        self.convergiu_fonte_fixa = []
         self.historico_residuo_fonte_ultima_chamada = []
         self.historicos_residuo_fonte = []
         
@@ -102,7 +103,7 @@ class SolverDifusaoAI4PDEs:
     @staticmethod
     def nome_metodo(metodo):
         nomes = {
-            "unet_multigrid": "U-Net/multigrid sem treinamento",
+            "unet_multigrid": "Correção multiescala por pooling/interpolação",
             "thomas": "Thomas clássico",
         }
         return nomes.get(metodo, metodo)
@@ -123,14 +124,14 @@ class SolverDifusaoAI4PDEs:
             self.cond_esquerda,
             self.cond_direita,
         ).to(self.device)
-        self.solver_fonte_fixa = SolverFonteFixaUNet1D(
+        self.solver_fonte_fixa = SolverFonteFixaMultiescala1D(
             self.modelo_A,
             omega=self.omega_fonte,
             amortecimento_unet=self.amortecimento_unet,
         ).to(self.device)
         self.metodo_executado = (
             "Adaptação 1D Neural Physics/AI4PDEs: operadores convolucionais fixos "
-            "e correção multiescala sem treinamento"
+            "e correção multiescala por pooling/interpolação, sem treinamento"
         )
     
     def resolver_fonte_fixa_unet(self, S, chute=None):
@@ -140,18 +141,19 @@ class SolverDifusaoAI4PDEs:
         chute_tensor = None
         if chute is not None:
             chute_tensor = chute.to(self.device).float() if torch.is_tensor(chute) else torch.tensor(chute, device=self.device, dtype=torch.float32)
-        phi, n_iter, residuo, historico = self.solver_fonte_fixa.resolver(
+        resultado = self.solver_fonte_fixa.resolver(
             S_tensor,
             chute=chute_tensor,
             tol=self.tol_fonte,
             max_iter=self.max_iter_fonte,
         )
-        self.iteracoes_fonte_fixa.append(int(n_iter))
-        self.residuos_fonte_fixa.append(float(residuo))
-        self.historico_residuo_fonte_ultima_chamada = list(historico)
+        self.iteracoes_fonte_fixa.append(int(resultado.n_iter))
+        self.residuos_fonte_fixa.append(float(resultado.residuo))
+        self.convergiu_fonte_fixa.append(bool(resultado.convergiu))
+        self.historico_residuo_fonte_ultima_chamada = list(resultado.historico_residuo)
         if self.guardar_historicos_fonte:
-            self.historicos_residuo_fonte.append(list(historico))
-        return phi
+            self.historicos_residuo_fonte.append(list(resultado.historico_residuo))
+        return resultado.phi
 
     def resolver_fonte_fixa_thomas(self, S):
         if self.modelo_A is None:
@@ -165,6 +167,7 @@ class SolverDifusaoAI4PDEs:
         norma_rhs = max(float(np.linalg.norm(rhs, ord=np.inf)), 1.0)
         self.iteracoes_fonte_fixa.append(1)
         self.residuos_fonte_fixa.append(residuo)
+        self.convergiu_fonte_fixa.append(True)
         self.historico_residuo_fonte_ultima_chamada = [residuo / norma_rhs]
         if self.guardar_historicos_fonte:
             self.historicos_residuo_fonte.append([residuo / norma_rhs])
@@ -221,6 +224,7 @@ class SolverDifusaoAI4PDEs:
         self.tempos_iteracao = []
         self.iteracoes_fonte_fixa = []
         self.residuos_fonte_fixa = []
+        self.convergiu_fonte_fixa = []
         self.historico_residuo_fonte_ultima_chamada = []
         self.historicos_residuo_fonte = []
         self.convergiu = False
@@ -330,6 +334,9 @@ class SolverDifusaoAI4PDEs:
             "Iter. fonte média": float(np.mean(self.iteracoes_fonte_fixa)) if self.iteracoes_fonte_fixa else 0.0,
             "Resíduo final": float(self.residuos_fonte_fixa[-1]) if self.residuos_fonte_fixa else None,
             "Tempo (s)": self.tempo_total,
+            "Fonte fixa convergiu (todas as chamadas)": bool(self.convergiu_fonte_fixa) and all(self.convergiu_fonte_fixa),
+            "Chamadas fonte fixa não convergidas": int(sum(1 for ok in self.convergiu_fonte_fixa if not ok)),
+            "Bateu max_iter externo": not self.convergiu,
         }
 
 
