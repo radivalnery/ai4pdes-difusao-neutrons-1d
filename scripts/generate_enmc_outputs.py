@@ -18,7 +18,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from neutron_ai4pdes.solver import SolverDifusaoAI4PDEs, executar_sensibilidade
+from neutron_ai4pdes.solver import SolverDifusaoAI4PDEs
 
 
 OUT = ROOT / "outputs"
@@ -34,7 +34,7 @@ def salvar_csv(path, rows):
         writer.writerows(rows)
 
 
-def escrever_markdown(path, titulo, comparacao, sensibilidade):
+def escrever_markdown(path, titulo, comparacao):
     linhas = [
         f"# {titulo}",
         "",
@@ -52,20 +52,6 @@ def escrever_markdown(path, titulo, comparacao, sensibilidade):
             f"| {r['Caso']} | {r['Método']} | {r['N']} | {r['k_eff']:.8f} | "
             f"{r['Referência'] if r['Referência'] else 'N/A'} | "
             f"{r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
-            f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
-            f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | {r['Tempo (s)']:.4f} |"
-        )
-    linhas.extend([
-        "",
-        "## Análise de sensibilidade",
-        "",
-        "| Caso | tol_fonte | omega | amortecimento | k_eff | Erro k (%) | Iter. externas | Iter. fonte média | Resíduo final | Tempo (s) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ])
-    for r in sensibilidade:
-        linhas.append(
-            f"| {r['Caso']} | {r['tol_fonte']:.1e} | {r['omega']:.2f} | {r['amortecimento']:.2f} | "
-            f"{r['k_eff']:.8f} | {r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
             f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
             f"{r['Resíduo final'] if r['Resíduo final'] is not None else 'N/A'} | {r['Tempo (s)']:.4f} |"
         )
@@ -126,6 +112,8 @@ def comparar(caso, nome):
     for metodo in ("unet_multigrid", "thomas"):
         cfg = dict(caso)
         cfg["metodo_fonte"] = metodo
+        if metodo == "thomas":
+            cfg["permitir_thomas_comparacao"] = True
         solver = SolverDifusaoAI4PDEs(**cfg)
         solver.resolver()
         rows.append(solver.resumo_resultado(nome))
@@ -135,28 +123,15 @@ def comparar(caso, nome):
 def main():
     casos = [("homogeneo", caso_homogeneo()), ("heterogeneo", caso_heterogeneo())]
     todas_cmp = []
-    todas_sens = []
     for nome, cfg in casos:
         cmp_rows = comparar(cfg, nome)
-        sens_rows = executar_sensibilidade(cfg)
-        for row in sens_rows:
-            row["Caso"] = nome
         todas_cmp.extend(cmp_rows)
-        todas_sens.extend(sens_rows)
         escrever_markdown(
             OUT / f"relatorio_{nome}_comparativo.md",
             f"Relatório {nome} comparativo",
             cmp_rows,
-            sens_rows,
-        )
-        escrever_markdown(
-            OUT / f"relatorio_sensibilidade_{nome}.md",
-            f"Relatório de sensibilidade {nome}",
-            cmp_rows,
-            sens_rows,
         )
     salvar_csv(OUT / "resultados_comparacao.csv", todas_cmp)
-    salvar_csv(OUT / "resultados_sensibilidade.csv", todas_sens)
     print(f"Saídas gravadas em: {OUT}")
 
 
