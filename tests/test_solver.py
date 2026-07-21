@@ -70,7 +70,11 @@ def test_heterogeneo_regressao_keff_unet_multigrid():
 def test_unet_multigrid_e_thomas_keff_proximos():
     cfg = cfg_homogeneo(N=30, max_iter=80, max_iter_fonte=800)
     unet = SolverDifusaoAI4PDEs(**cfg, metodo_fonte="unet_multigrid")
-    thomas = SolverDifusaoAI4PDEs(**cfg, metodo_fonte="thomas")
+    thomas = SolverDifusaoAI4PDEs(
+        **cfg,
+        metodo_fonte="thomas",
+        permitir_thomas_comparacao=True,
+    )
     unet.resolver()
     thomas.resolver()
     rel = abs(unet.k_eff - thomas.k_eff) / abs(thomas.k_eff)

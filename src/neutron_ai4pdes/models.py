@@ -215,7 +215,7 @@ class SolverFonteFixaUNet1D(nn.Module):
 
     def __init__(self, operador_A, omega=0.75, amortecimento_unet=0.20,
                  max_niveis=6, min_pontos_grosso=5, pre_suavizacoes=2,
-                 post_suavizacoes=2):
+                 post_suavizacoes=2, suavizacoes_grosso=20):
         super().__init__()
         self.operador_A = operador_A
         self.omega = float(omega)
@@ -224,6 +224,7 @@ class SolverFonteFixaUNet1D(nn.Module):
         self.min_pontos_grosso = int(min_pontos_grosso)
         self.pre_suavizacoes = int(pre_suavizacoes)
         self.post_suavizacoes = int(post_suavizacoes)
+        self.suavizacoes_grosso = int(suavizacoes_grosso)
         self.operadores = nn.ModuleList([operador_A])
         self._construir_hierarquia()
 
@@ -290,9 +291,11 @@ class SolverFonteFixaUNet1D(nn.Module):
         ).view(-1)
 
     def _resolver_grosso(self, operador, rhs):
-        lower, diag, upper, rhs_np = operador.matriz_tridiagonal_numpy(rhs.detach().cpu().numpy())
-        sol = resolver_tridiagonal_thomas(lower, diag, upper, rhs_np)
-        return torch.tensor(sol, device=rhs.device, dtype=torch.float32)
+        """Resolve o nível mais grosso por Jacobi, sem solver direto clássico."""
+        diag = operador.diagonal()
+        phi = torch.zeros_like(rhs)
+        phi = operador.aplicar_contorno_fluxo(phi)
+        return self._suavizar_jacobi(operador, phi, rhs, diag, self.suavizacoes_grosso)
 
     def _ciclo_unet_multigrid(self, nivel, phi, rhs):
         operador = self.operadores[nivel]

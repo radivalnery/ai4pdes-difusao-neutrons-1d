@@ -47,7 +47,6 @@ Implementa:
 - arquitetura algorítmica inspirada em U-Net/multigrid;
 - método clássico de Thomas para sistemas tridiagonais;
 - comparação entre resolvedores;
-- análise de sensibilidade;
 - interface Tkinter e relatórios PDF/Markdown.
 """
 

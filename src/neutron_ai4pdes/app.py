@@ -10,7 +10,7 @@ from .gui import DifusaoGUI_AI4PDEs
 def main():
     print("=" * 60)
     print("SOLVER DE DIFUSÃO DE NÊUTRONS 1D")
-    print("Neural Physics/AI4PDEs: stencil + Conv1d + ciclo U-Net/multigrid")
+    print("Neural Physics/AI4PDEs: operador conservativo local em PyTorch + ciclo U-Net/multigrid")
     print("=" * 60)
     print("Pacote ai4pdes 2D/3D não é chamado diretamente neste caso 1D")
     print(f"CUDA disponível: {torch.cuda.is_available()}")

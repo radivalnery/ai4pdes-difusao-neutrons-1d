@@ -13,7 +13,7 @@ from .references import calcular_k_eff_analitico, fluxo_analitico_homogeneo
 class SolverDifusaoAI4PDEs:
     REFERENCIAS = {
         'homogeneo': {'k_eff': None, 'fonte': 'Analítica'},
-        'heterogeneo': {'k_eff': 1.09506, 'fonte': 'Nozimar'}
+        'heterogeneo': {'k_eff': 1.09506, 'fonte': 'Couto (2003)'}
     }
     
     def __init__(self, L, N, materiais, cond_esquerda='reflexiva', cond_direita='vácuo',
@@ -21,7 +21,8 @@ class SolverDifusaoAI4PDEs:
                  pontos_interesse=None, progress_callback=None, dispositivo_preferido='auto',
                  omega_fonte=0.75, amortecimento_unet=0.20,
                  tol_fonte=None, max_iter_fonte=5000,
-                 metodo_fonte="unet_multigrid", guardar_historicos_fonte=False):
+                 metodo_fonte="unet_multigrid", guardar_historicos_fonte=False,
+                 permitir_thomas_comparacao=False):
         
         self.L = L
         self.N = N
@@ -42,6 +43,7 @@ class SolverDifusaoAI4PDEs:
         self.max_iter_fonte = int(max_iter_fonte)
         self.metodo_fonte = metodo_fonte
         self.guardar_historicos_fonte = guardar_historicos_fonte
+        self.permitir_thomas_comparacao = bool(permitir_thomas_comparacao)
         
         self.materiais = materiais
         self.D_arr = np.zeros(N+1)
@@ -68,9 +70,9 @@ class SolverDifusaoAI4PDEs:
 
         self.nome_dispositivo = self.obter_nome_dispositivo()
         self.metodo_executado = (
-            "AI4PDEs 1D adaptado com PyTorch CUDA"
+            "Neural Physics 1D adaptado com PyTorch CUDA"
             if self.device.type == 'cuda'
-            else "AI4PDEs 1D adaptado com PyTorch CPU"
+            else "Neural Physics 1D adaptado com PyTorch CPU"
         )
         self.modelo_A = None
         self.solver_fonte_fixa = None
@@ -160,6 +162,11 @@ class SolverDifusaoAI4PDEs:
         return phi
 
     def resolver_fonte_fixa_thomas(self, S):
+        if not self.permitir_thomas_comparacao:
+            raise RuntimeError(
+                "Thomas está disponível apenas para comparação externa. "
+                "O método principal deve ser unet_multigrid."
+            )
         if self.modelo_A is None:
             raise RuntimeError("O operador A ainda não foi criado.")
         S_np = S.detach().cpu().numpy() if torch.is_tensor(S) else np.asarray(S, dtype=float)
@@ -352,6 +359,10 @@ class SolverDifusaoAI4PDEs:
             "Chamadas fonte fixa não convergidas": int(sum(1 for ok in self.convergiu_fonte_fixa if not ok)),
             "Bateu max_iter externo": not self.convergiu,
             "Tempo (s)": self.tempo_total,
+            "tol_fonte": self.tol_fonte,
+            "max_iter_fonte": self.max_iter_fonte,
+            "omega_fonte": self.omega_fonte,
+            "amortecimento_unet": self.amortecimento_unet,
         }
 
 
@@ -361,6 +372,8 @@ def executar_comparacao_resolvedores(config_base, metodos=("unet_multigrid", "th
     for metodo in metodos:
         cfg = dict(config_base)
         cfg["metodo_fonte"] = metodo
+        if metodo == "thomas":
+            cfg["permitir_thomas_comparacao"] = True
         solver = SolverDifusaoAI4PDEs(**cfg)
         solver.resolver()
         resultados.append(solver.resumo_resultado())
@@ -368,34 +381,7 @@ def executar_comparacao_resolvedores(config_base, metodos=("unet_multigrid", "th
     return resultados, solvers
 
 
-def executar_sensibilidade(config_base, tol_fonte_values=None, omega_values=None, amortecimento_values=None):
-    tol_fonte_values = tol_fonte_values or [1.0e-4, 1.0e-5, 1.0e-6]
-    omega_values = omega_values or [config_base.get("omega_fonte", 0.75)]
-    amortecimento_values = amortecimento_values or [config_base.get("amortecimento_unet", 0.20)]
-
-    resultados = []
-    for tol_fonte in tol_fonte_values:
-        for omega in omega_values:
-            for amortecimento in amortecimento_values:
-                cfg = dict(config_base)
-                cfg.update({
-                    "metodo_fonte": "unet_multigrid",
-                    "tol_fonte": tol_fonte,
-                    "omega_fonte": omega,
-                    "amortecimento_unet": amortecimento,
-                })
-                solver = SolverDifusaoAI4PDEs(**cfg)
-                solver.resolver()
-                row = solver.resumo_resultado()
-                row.update({
-                    "tol_fonte": tol_fonte,
-                    "omega": omega,
-                    "amortecimento": amortecimento,
-                })
-                resultados.append(row)
-    return resultados
-
-
 # ============================================================================
 # 4. INTERFACE GRÁFICA
 # ============================================================================
+
