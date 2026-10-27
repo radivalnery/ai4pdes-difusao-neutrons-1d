@@ -29,7 +29,7 @@ def test_tkinter_mef_parametros_e_tabela(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     try:
         app = DifusaoGUI_AI4PDEs(root)
-        app.discretizacao_var.set('MEF')
+        app.selecionar_discretizacoes(('mef',))
         assert app.obter_configuracao_solver()['discretizacao'] == 'mef'
         assert app.obter_configuracao_solver()['precisao'] == 'float64'
         app.carregar_problema('Heterogêneo (Couto, 2003)')
@@ -59,7 +59,7 @@ def test_tkinter_mef_parametros_e_tabela(tmp_path, monkeypatch):
         # Executa o mesmo caminho do botao 'ambos', mantendo a GUI invisivel.
         app.N_entry.delete(0, tk.END)
         app.N_entry.insert(0, '13')
-        app.metodo_fonte_var.set('ambos')
+        app.thomas_var.set(True)
         deadline = time.monotonic()+40
         def check_solver():
             if errors or (app.solver is not None and not app.executando) or time.monotonic() >= deadline:
@@ -79,7 +79,7 @@ def test_tkinter_mef_parametros_e_tabela(tmp_path, monkeypatch):
             if mode == 'tempo_metodo':
                 assert app.ax.get_yscale() == 'log'
             else:
-                assert 'Thomas' in app.ax.get_legend_handles_labels()[1]
+                assert any('Thomas' in label for label in app.ax.get_legend_handles_labels()[1])
         # O gerador PDF da GUI deve consumir os resultados capturados do solver.
         target = tmp_path/'relatorio_tkinter_mef.pdf'
         monkeypatch.setattr('neutron_ai4pdes.gui.filedialog.asksaveasfilename', lambda **kw: str(target))

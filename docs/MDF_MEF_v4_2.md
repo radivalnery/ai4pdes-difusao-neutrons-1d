@@ -4,9 +4,10 @@
 
 | Escolha | Opcoes | Significado |
 |---|---|---|
-| Discretizacao | MDF, MEF | Formulacao do sistema algebrico |
+| Discretizacao | Caixas MDF e MEF | Uma ou ambas, com os demais parametros comuns |
 | Precisao | float64, float32 | A mesma escolha vale para MDF e MEF; padrao float64 |
-| Execucao na GUI | unet_multigrid, ambos | Metodo principal e referencia opcional |
+| Modo na GUI | Sequencial, Paralelo | Um apos o outro ou dois perfis concorrentes |
+| Incluir referencia Thomas | Sim, nao | Referencia externa opcional por discretizacao |
 | CLI --discretizacao | mdf, mef, ambos | Uma campanha ou duas campanhas consolidadas |
 
 A equacao e `-d/dx(D dphi/dx) + Sigma_a phi = nuSigma_f phi/k_eff`.
@@ -161,6 +162,8 @@ sem convergencia servem apenas para verificar funcionamento, nao para o artigo.
 | stencils.py | Banco Conv1d comum, medidas H e transferencias ponderadas |
 | fem.py | Montagem P1 consistente e escalonamento das linhas |
 | solver.py | Autovalor, fonte, potencia e instrumentacao |
+| campaigns.py | Configuracao capturada, concorrencia isolada e eventos para a GUI |
+| plots.py | Mesmos graficos comparativos na janela e no PDF |
 | gui.py | Parametros Tkinter, graficos, tabela e relatorios da GUI |
 | experiments.py | CLI, campanhas e exportacoes para artigo |
 | metrics.py | Normalizacao de forma e erros globais |
@@ -196,3 +199,52 @@ O gerador legado tools/build_single_v4.py agora delega a tools/build_single_v4_2
 - Convergencia de ordem dois no autovalor homogeneo refinado.
 - Bloqueio de Thomas no caminho principal e flag de nao convergencia.
 - Regressao MDF e igualdade numerica entre modular e arquivo unico.
+
+## 7. Comparacao selecionavel na GUI
+
+Marcar MDF/MEF nao cria parametros independentes: variam apenas as formulacoes
+ja validadas. O mesmo N (ou a mesma lista de N), precisao, materiais, contornos
+e tolerancias e repassado aos dois perfis. O backend numerico nao foi alterado.
+
+```text
+Parametros comuns capturados
+             |
+      MDF marcado? --- MEF marcado?
+             |              |
+    Sequencial: um apos o outro
+    Paralelo: uma thread por perfil
+             |              |
+        Solver proprio + Thomas opcional externo
+             |              |
+       Fila de eventos -> Tkinter na thread principal
+             |
+       Graficos sobrepostos + tabelas + PDF/Markdown
+```
+
+Cada trabalhador tem seus proprios solvers e copias dos materiais. As malhas
+de um mesmo perfil e sua referencia Thomas sao sequenciais. Nao se alteram
+threads globais do PyTorch nem o metodo de resolucao. O compartilhamento de
+CPU/GPU interfere nas medicoes paralelas; o aviso e mostrado antes de executar
+e preservado nos dados, graficos de tempo e relatorios. A concorrencia de
+hardware depende do dispositivo; CUDA nao foi validada nesta entrega.
+
+O tempo de parede mede a campanha completa, sem graficos/exportacao. Montagem,
+transferencia e iteracao sao os tempos reais de cada solver (nao dividir ou
+recalcular usando o tempo de parede). Fonte fixa e parte da iteracao numerica.
+
+A aba Execucoes identifica discretizacao, N, metodo, estado, iteracao, k_eff e
+tempos. O progresso total indica processamento, nao garantia de convergencia.
+Falhas e resultados nao convergidos ficam identificados; nao se troca o solver
+principal por Thomas como fallback. A GUI so e atualizada pela thread principal.
+
+A tabela tem uma linha por (discretizacao,N,x). No heterogeneo, a referencia
+interna e o maior N CONVERGIDO de cada discretizacao. Sem referencia valida,
+o erro fica N/A; referencias de fluxo zero tambem recebem N/A. Erros globais
+versus Thomas so aparecem quando os dois solvers correspondentes convergiram.
+
+Fluxo e forma do fluxo mostram o maior N solicitado para cada perfil. Se um
+caso falhar por excecao, nao se substitui silenciosamente por outro N.
+Graficos e PDF usam a mesma funcao de desenho, evitando curvas ausentes no PDF.
+Formulario alterado depois da execucao nao e fonte de parametros do relatorio.
+
+Backup anterior a essa interface: backups/antes_selecao_mdf_mef_20261027_012606/.

@@ -617,9 +617,6 @@ def main():
 
     parser = construir_parser()
     args = parser.parse_args()
-    if args.discretizacao == 'ambos' and not args.experimento_artigo:
-        parser.error('--discretizacao ambos requer --experimento-artigo; na GUI selecione MDF ou MEF.')
-
     if args.experimento_artigo:
         executar_experimento_artigo(args)
         return
@@ -628,8 +625,7 @@ def main():
     from .gui import DifusaoGUI_AI4PDEs
     root = tk.Tk()
     app = DifusaoGUI_AI4PDEs(root)
-    if args.discretizacao != 'ambos':
-        app.discretizacao_var.set(args.discretizacao.upper())
+    app.selecionar_discretizacoes(('mdf','mef') if args.discretizacao == 'ambos' else (args.discretizacao,))
     app.precisao_var.set(args.precisao)
     root.mainloop()
 

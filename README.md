@@ -7,9 +7,11 @@ treinamento de pesos.
 
 ## Versao MDF + MEF (v4.2)
 
-A interface Tkinter e o arquivo unico permitem escolher **Discretizacao: MDF ou
-MEF**. A escolha **Execucao: ambos** executa Neural Physics e Thomas para a
-mesma discretizacao; Thomas e apenas referencia numerica externa.
+A interface Tkinter e o arquivo unico permitem **marcar MDF, MEF ou ambos**.
+Os parametros fisicos, N, precisao e tolerancias sao comuns aos perfis.
+Escolha o modo **Sequencial** ou **Paralelo** e clique em **Executar selecionados**.
+A opcao separada **Incluir referencia Thomas** e somente verificacao numerica
+externa de cada discretizacao; nao troca o resolvedor principal.
 
 ```powershell
 python main.py
@@ -17,10 +19,28 @@ python main.py
 python difusao_neutrons_neuralphysics_1d_mdf_mef_v4_2.py
 ```
 
-Na GUI, selecione o problema, a discretizacao e os parametros e clique em
-Executar. O MEF usa elementos lineares P1 de Galerkin, massa consistente e
+Na GUI, selecione o problema, marque as discretizacoes e configure os parametros.
+O MEF usa elementos lineares P1 de Galerkin, massa consistente e
 integracao dos materiais por elemento. N significa intervalos/elementos;
 ha N+1 nos. O contorno chamado vacuo representa fluxo nulo, como no MDF.
+
+| Modo na GUI | Execucao | Interpretacao dos tempos |
+|---|---|---|
+| Sequencial (padrao) | Um perfil apos o outro, automaticamente | Sem concorrencia dos perfis desta campanha |
+| Paralelo | Dois trabalhadores independentes, um MDF e outro MEF | CPU/GPU compartilhados; nao mede desempenho isolado |
+
+O modo paralelo exige confirmacao do aviso quando ambos estao marcados.
+Com apenas um perfil, a execucao e sequencial, mesmo se Paralelo foi solicitado.
+Nenhum desses modos altera o multigrid ou o numero global de threads do PyTorch.
+
+A aba **Execucoes** mostra estado, iteracao, k_eff e tempos por configuracao.
+Os graficos sobrepoem MDF/MEF e suas referencias opcionais. A tabela possui
+uma linha por **(discretizacao, N, x)**. Gerar Tabela (N) respeita os mesmos
+perfis e modo selecionados; cada erro heterogeneo usa a referencia de malha
+da sua propria discretizacao, nunca o fluxo da outra.
+
+As configuracoes sao capturadas no inicio e os campos ficam bloqueados durante
+a campanha. Alteracoes posteriores no formulario nao mudam o relatorio salvo.
 
 Para gerar CSVs, figuras, tabelas LaTeX e relatorio PDF/Markdown sem a GUI:
 
@@ -35,6 +55,8 @@ Com `--discretizacao ambos`, cada campanha fica em `mdf/` e `mef/`, com seus
 relatorios e figuras; os CSVs reunidos ficam em `csv/` na pasta de saida.
 O PDF consolidado fica em `relatorios/relatorio_experimental.pdf`.
 O arquivo unico aceita exatamente os mesmos argumentos.
+O modo de artigo da CLI continua sequencial; o seletor Paralelo pertence a GUI.
+Para abrir a GUI com os dois perfis ja marcados: `python main.py --gui --discretizacao ambos`.
 
 | Caso | Valores de N | Posicoes x (cm) |
 |---|---|---|
@@ -96,6 +118,8 @@ src/neutron_ai4pdes/
   gui.py                        frontend Tkinter, graficos e relatorio
   solver.py                     backend numerico do problema de autovalor
   models.py                     operador discreto e solver de fonte fixa
+  campaigns.py                  filas MDF/MEF sequenciais ou concorrentes
+  plots.py                      graficos compartilhados pela GUI e PDF
   stencils.py                   banco Conv1d e transferencias comuns MDF/MEF
   fem.py                        montagem MEF P1, massa consistente
   metrics.py                    erros globais de forma do fluxo
@@ -156,7 +180,13 @@ A versao `v4_1` inclui:
 Na interface, as planilhas CSV sao salvas na pasta de execucao do programa:
 
 - `resultados_refinamento.csv`;
-- `resultados_comparacao.csv`, apenas quando a opcao de comparacao com Thomas e usada.
+- `resultados_comparacao.csv`, com todos os perfis/resolvedores executados;
+- `configuracao_execucao.json`, com os parametros capturados, modos solicitado/
+  efetivo, tempo de parede, aviso dos tempos e falhas registradas.
+
+Esses arquivos correspondem a ultima campanha da GUI e sao atualizados ao final.
+No paralelo, nao some os tempos individuais para obter o tempo da campanha.
+O relatorio PDF/Markdown inclui os perfis executados, tempos separados e o aviso.
 
 No modo `--experimento-artigo`, os arquivos principais sao:
 

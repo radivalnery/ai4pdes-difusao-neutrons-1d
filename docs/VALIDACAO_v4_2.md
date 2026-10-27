@@ -1,5 +1,67 @@
 # Validacao MDF/MEF v4.2 - comparacao controlada
 
+## Atualizacao: selecao e execucao MDF/MEF na GUI
+
+Em 27/10/2026, a GUI ganhou selecao por caixas MDF/MEF e modos Sequencial/
+Paralelo, mantendo todos os demais parametros comuns. Thomas continua opcional
+e externo, em uma escolha separada. Nao houve alteracao em solver.py, models.py,
+fem.py ou stencils.py nesta atualizacao.
+
+| Verificacao atual | Resultado |
+|---|---|
+| Suite sem os dois testes lentos | 49 aprovados, 2 excluidos |
+| Backend de campanhas | 9 testes: equivalencia, sobreposicao real, isolamento, falhas e arquivo unico |
+| GUI comparativa | 4 testes: sequencial/paralelo, referencias separadas e janela 1280x720 |
+| GUI MEF anterior | Aprovada, com selecao e referencia Thomas atualizadas |
+| Compilacao das fontes alteradas e arquivo unico | OK |
+
+Os dois testes lentos de regressao MDF nao foram reexecutados nesta atualizacao;
+seu ultimo resultado e o historico abaixo. Os demais testes numericos da suite
+incluem as fontes fixas MEF nas malhas N=104 e N=384.
+
+Foram exercitadas campanhas reais da GUI oculta, com mainloop:
+- Homogeneo, sequencial, N=1,13, MDF/MEF e referencia Thomas: 8 resolucoes convergiram.
+- Heterogeneo, paralelo, N=3,12, MDF/MEF e referencia Thomas: 8 resolucoes convergiram.
+- Tabelas geradas: 12 linhas no homogeneo e 16 no heterogeneo, por (discr,N,x).
+
+Os testes confirmam identica saida numerica em CPU entre execucao sequencial
+e paralela para os casos pequenos. A sobreposicao das duas threads tambem e
+testada com uma barreira, sem pressupor aceleracao. O numero global de threads
+do PyTorch nao e alterado pelo executor. CUDA nao foi validada.
+
+Foram verificados os estados por execucao, a atualizacao Tk somente na thread
+principal, a confirmacao do aviso paralelo, o cancelamento desse aviso e a
+validacao de selecao vazia. Campos ficam bloqueados durante a campanha.
+Alterar o formulario depois nao muda o PDF/Markdown dos dados ja calculados.
+
+Os graficos e os PDFs usam o mesmo desenho. Fluxo, forma, convergencia,
+residuo, tempos, refinamento e materiais identificam MDF/MEF. Refinamento
+mantem k_eff e erro k em eixos separados; N e linear com rotulos dos valores
+calculados nas listas pequenas. Eixos secundarios sao removidos ao trocar
+de vista, evitando sobreposicoes. Referencias heterogeneas sao separadas por
+discretizacao; uma referencia MEF nao e usada no erro MDF.
+
+Apos incorporar as fontes DejaVu Sans fornecidas pelo Matplotlib aos PDFs,
+os cinco testes de GUI foram repetidos e aprovados. Os PDFs foram novamente
+renderizados: phi/Sigma legiveis, tabelas dentro das margens, sem texto
+invadindo colunas e sem depender de fontes Symbol externas.
+
+Uma execucao ampla posterior terminou com 48 aprovados, 1 teste GUI pulado
+por indisponibilidade intermitente de inicializacao Tcl/Tk e 2 longos excluidos.
+O teste pulado corresponde ao modo sequencial da GUI; foi separado para nova
+execucao e passou (1 aprovado em 10.65 s). Isso nao foi tratado como falha
+numerica nem alteracao do solver. A indisponibilidade Tcl/Tk foi registrada,
+nao ocultada como sucesso da rodada ampla.
+
+Artefatos locais de verificacao em resultados_validacao_selecao_v4_2/:
+graficos PNG, CSV/JSON dos parametros registrados e PDF/Markdown por caso.
+Tempos sao de verificacao funcional, NAO benchmark. O aviso dos tempos
+paralelos acompanha a GUI, CSV/JSON, graficos e relatorios.
+
+Backup anterior: backups/antes_selecao_mdf_mef_20261027_012606/.
+
+## Historico: validacao do nucleo controlado (commit 408c6b7)
+
 Validacao executada em 27/10/2026, CPU, Python 3.14 e PyTorch 2.12.1+cpu.
 CUDA nao foi validada. Os testes usam uma thread para limitar o custo das
 malhas pequenas; a campanha registra seu ambiente em hardware_ambiente.json.
