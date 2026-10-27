@@ -1,16 +1,9 @@
-"""Operadores discretos e resolvedores de fonte fixa.
-
-O termo Neural Physics usado neste projeto não indica treinamento de uma rede
-neural. Ele indica a implementação de operadores numéricos fixos por operações
-típicas de bibliotecas de IA, como convolução, pooling e interpolação.
-"""
-
+"""Operadores MDF e ciclo U-Net/multigrid sem treinamento, base v4.1."""
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-
 
 @dataclass
 class ResultadoFonteFixa:
@@ -277,11 +270,11 @@ class SolverFonteFixaUNet1D(nn.Module):
             phi = operador.aplicar_contorno_fluxo(phi)
         return phi
 
-    def _restringir(self, fine):
+    def _restringir(self, fine, nivel=0):
         """Restrição full-weighting: I_h^2h r_h."""
         return self._coarsen_array(fine)
 
-    def _prolongar(self, coarse, tamanho_fino):
+    def _prolongar(self, coarse, tamanho_fino, nivel=0):
         """Prolongamento linear: I_2h^h e_2h."""
         return F.interpolate(
             coarse.view(1, 1, -1),
@@ -290,7 +283,7 @@ class SolverFonteFixaUNet1D(nn.Module):
             align_corners=True,
         ).view(-1)
 
-    def _resolver_grosso(self, operador, rhs):
+    def _resolver_grosso(self, operador, rhs, chute=None):
         """Resolve o nível mais grosso por Jacobi, sem solver direto clássico."""
         diag = operador.diagonal()
         phi = torch.zeros_like(rhs)
@@ -302,29 +295,31 @@ class SolverFonteFixaUNet1D(nn.Module):
         diag = operador.diagonal()
 
         if nivel == len(self.operadores) - 1:
-            return self._resolver_grosso(operador, rhs)
+            return self._resolver_grosso(operador, rhs, chute=phi)
 
         phi = self._suavizar_jacobi(operador, phi, rhs, diag, self.pre_suavizacoes)
         residuo = rhs - operador(phi)
-        residuo_grosso = self._restringir(residuo)
+        residuo_grosso = self._restringir(residuo, nivel)
         erro_grosso = torch.zeros_like(residuo_grosso)
         erro_grosso = self._ciclo_unet_multigrid(nivel + 1, erro_grosso, residuo_grosso)
-        erro_fino = self._prolongar(erro_grosso, phi.numel())
+        erro_fino = self._prolongar(erro_grosso, phi.numel(), nivel)
         phi = phi + self.amortecimento_unet * erro_fino
         phi = operador.aplicar_contorno_fluxo(phi)
         phi = self._suavizar_jacobi(operador, phi, rhs, diag, self.post_suavizacoes)
         return phi
 
     def resolver(self, rhs, chute=None, tol=1.0e-5, max_iter=5000):
-        rhs = self._corrigir_contorno_rhs(rhs.float())
+        dtype = self.operador_A.diagonal().dtype
+        rhs = self._corrigir_contorno_rhs(rhs.to(dtype=dtype))
         if chute is None:
             phi = torch.zeros_like(rhs)
         else:
-            phi = chute.clone().float()
+            phi = chute.clone().to(dtype=dtype)
         phi = self.operador_A.aplicar_contorno_fluxo(phi)
 
         diag = self.operador_A.diagonal()
-        norma_rhs = max(float(torch.linalg.vector_norm(rhs, ord=float('inf')).item()), 1.0)
+        norma_rhs = max(float(torch.linalg.vector_norm(rhs, ord=float('inf')).item()),
+                        getattr(self, 'norma_rhs_minima', 1.0))
         ultimo_residuo = float('inf')
         historico_residuo = []
 

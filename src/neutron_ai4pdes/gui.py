@@ -1,6 +1,7 @@
-"""Interface gráfica Tkinter e geração de relatório."""
-
+"""Interface Tkinter, graficos e relatorios; base v4.1 preservada."""
+import argparse
 import csv
+import json
 import os
 import platform
 import tempfile
@@ -10,13 +11,13 @@ from datetime import datetime
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-
-from .method import METODO_AI4PDES_1D
-from .solver import SolverDifusaoAI4PDEs
+from matplotlib.ticker import MaxNLocator
 
 try:
     from reportlab.lib import colors
@@ -28,6 +29,9 @@ try:
 except ImportError:
     REPORTLAB_AVAILABLE = False
 
+from .method import METODO_AI4PDES_1D
+from .solver import SolverDifusaoAI4PDEs
+from .metrics import erro_forma_fluxo
 
 class DifusaoGUI_AI4PDEs:
     def __init__(self, root):
@@ -36,6 +40,7 @@ class DifusaoGUI_AI4PDEs:
         self.root.state('zoomed')
         
         self.solver = None
+        self.solver_thomas = None
         self.executando = False
         self.resultados_tabela = []
         self.resultados_comparacao = []
@@ -49,7 +54,8 @@ class DifusaoGUI_AI4PDEs:
                               'Sigma_a': 0.065, 'nuSigma_f': 0.0681}],
                 'esquerda': 'reflexiva', 'direita': 'vácuo',
                 'potencia': 100.0,
-                'pontos': [0.0, 13.0, 26.0]
+                'pontos': [0.0, 13.0, 26.0],
+                'malhas_tabela': [1, 13, 26, 52, 100, 104],
             },
             'Heterogêneo (Couto, 2003)': {
                 'L': 150.0, 'N': 300,
@@ -63,7 +69,8 @@ class DifusaoGUI_AI4PDEs:
                 ],
                 'esquerda': 'reflexiva', 'direita': 'vácuo',
                 'potencia': 100.0,
-                'pontos': [0.0, 50.0, 100.0, 150.0]
+                'pontos': [0.0, 50.0, 100.0, 150.0],
+                'malhas_tabela': [3, 12, 48, 96, 192, 300, 384],
             }
         }
         
@@ -166,7 +173,7 @@ class DifusaoGUI_AI4PDEs:
         ttk.Label(frame_botoes_tabela, text="Valores de N:").pack(side=tk.LEFT, padx=(0, 4))
         self.N_tabela_entry = ttk.Entry(frame_botoes_tabela, width=28)
         self.N_tabela_entry.pack(side=tk.LEFT, padx=2)
-        self.N_tabela_entry.insert(0, "10, 50, 100, 200, 300, 500")
+        self.N_tabela_entry.insert(0, "1, 13, 26, 52, 100, 104")
         
         self.btn_gerar_tabela = ttk.Button(frame_botoes_tabela, text="📊 Gerar Tabela (N)", 
                                           command=self.gerar_tabela_variando_N_thread)
@@ -253,6 +260,15 @@ class DifusaoGUI_AI4PDEs:
         self.N_entry = ttk.Entry(self.painel_controles, width=8)
         self.N_entry.grid(row=row, column=3, padx=3)
         self.N_entry.insert(0, "100")
+        row += 1
+
+        ttk.Label(self.painel_controles, text="Discretização:").grid(row=row, column=0, sticky=tk.W)
+        self.discretizacao_var = tk.StringVar(value='MDF')
+        self.discretizacao_combo = ttk.Combobox(
+            self.painel_controles, textvariable=self.discretizacao_var,
+            values=['MDF', 'MEF'], state='readonly', width=16,
+        )
+        self.discretizacao_combo.grid(row=row, column=1, columnspan=3, sticky=tk.W, padx=3)
         row += 1
         
         ttk.Label(self.painel_controles, text="Condições:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=3)
@@ -425,7 +441,7 @@ class DifusaoGUI_AI4PDEs:
 +----------------------------------------------------------------+
 
 +----------------------------------------------------------------+
-| 2. DISCRETIZACAO NO CASO HOMOGENEO                             |
+| 2. MDF NO CASO HOMOGENEO                                       |
 +----------------------------------------------------------------+
 | Stencil interno do operador A:                                 |
 | [-D/h^2,  2D/h^2 + Sigma_a,  -D/h^2]                           |
@@ -442,7 +458,7 @@ class DifusaoGUI_AI4PDEs:
 +----------------------------------------------------------------+
 
 +----------------------------------------------------------------+
-| 4. CASO HETEROGENEO                                            |
+| 4. MDF NO CASO HETEROGENEO                                     |
 +----------------------------------------------------------------+
 | O operador usa a forma conservativa:                           |
 | -d/dx[D(x) dphi/dx]                                            |
@@ -472,6 +488,29 @@ class DifusaoGUI_AI4PDEs:
 | Homogeneo: referencia analitica.                               |
 | Heterogeneo: referencia principal de k_eff e Couto (2003).     |
 +----------------------------------------------------------------+
+
++----------------------------------------------------------------+
+| 7. MEF DE GALERKIN: ELEMENTOS LINEARES P1                       |
++----------------------------------------------------------------+
+| (K + M_a) phi = M_f phi / k_eff                                |
+| K_e = D/h * [[1,-1],[-1,1]]                                   |
+| M_e(c) = c*h/6 * [[2,1],[1,2]]                                |
+| c = Sigma_a (absorcao) ou nuSigma_f (fissao).                  |
+| Massa consistente; materiais integrados por elemento/regiao.   |
+| Reflexiva: corrente nula natural. Vacuo: fluxo nulo.            |
+| Multigrid: operadores MEF, restricao P^T e interpolacao P.      |
+| Thomas verifica o mesmo sistema e nao entra no ciclo V.        |
++----------------------------------------------------------------+
+
++----------------------------------------------------------------+
+| 8. LEITURA DOS RESULTADOS                                      |
++----------------------------------------------------------------+
+| N = intervalos/elementos; numero de nos = N+1.                  |
+| Erro relativo pontual: N/A quando a referencia e zero.          |
+| Erro global de forma: normas nodais infinito e L2 relativa.     |
+| Tempos separados: montagem, transferencia e iteracao.           |
+| Fonte fixa ja esta incluida no tempo de iteracao numerica.      |
++----------------------------------------------------------------+
 """
         self.texto_ajuda.insert(tk.END, ajuda)
         self.texto_ajuda.config(state=tk.DISABLED)
@@ -500,6 +539,10 @@ class DifusaoGUI_AI4PDEs:
         pontos_str = ", ".join(str(p) for p in config.get('pontos', [0.0, 50.0, 100.0, 150.0]))
         self.pontos_entry.delete(0, tk.END)
         self.pontos_entry.insert(0, pontos_str)
+        malhas_str = ", ".join(str(n) for n in config.get('malhas_tabela', []))
+        if malhas_str and hasattr(self, 'N_tabela_entry'):
+            self.N_tabela_entry.delete(0, tk.END)
+            self.N_tabela_entry.insert(0, malhas_str)
         self.materiais_atual = [dict(m) for m in config['materiais']]
         self.atualizar_lista_materiais()
         self.status_bar.config(text=f"Problema '{nome}' carregado")
@@ -621,8 +664,7 @@ class DifusaoGUI_AI4PDEs:
         fluxos = {}
         phi_tabela = solver.phi_normalizado if solver.phi_normalizado is not None else solver.phi
         for ponto in pontos:
-            idx = int(np.argmin(np.abs(solver.x - ponto)))
-            fluxo = float(phi_tabela[idx]) if idx < len(phi_tabela) else 0.0
+            fluxo = float(np.interp(ponto, solver.x, phi_tabela))
             fluxos[ponto] = fluxo
         return fluxos
 
@@ -659,21 +701,23 @@ class DifusaoGUI_AI4PDEs:
                 erros = {}
                 fluxos = resultado.get('fluxos_pontos', {})
                 refs = resultado.get('fluxos_ref_analitico', {})
+                limite_zero = 1e-12 * max([abs(v) for v in refs.values()] or [1.])
                 for ponto in pontos:
                     fluxo = fluxos.get(ponto)
                     fluxo_ref = refs.get(ponto)
                     if fluxo is None or fluxo_ref is None:
                         erros[ponto] = None
-                    elif abs(fluxo_ref) > 1e-30:
+                    elif abs(fluxo_ref) > limite_zero:
                         erros[ponto] = 100.0 * abs(fluxo - fluxo_ref) / abs(fluxo_ref)
                     else:
-                        erros[ponto] = abs(fluxo - fluxo_ref)
+                        erros[ponto] = None
                 resultado['erro_fluxo_pontos'] = erros
             self.referencia_fluxo_tabela = 'analítica'
             return
 
         referencia = max(resultados, key=lambda item: item['N'])
         fluxos_ref = referencia.get('fluxos_pontos', {})
+        limite_zero = 1e-12 * max([abs(v) for v in fluxos_ref.values()] or [1.])
         for resultado in resultados:
             erros = {}
             for ponto in pontos:
@@ -681,22 +725,18 @@ class DifusaoGUI_AI4PDEs:
                 fluxo_ref = fluxos_ref.get(ponto)
                 if fluxo is None or fluxo_ref is None:
                     erros[ponto] = None
-                elif abs(fluxo_ref) > 1e-30:
+                elif abs(fluxo_ref) > limite_zero:
                     erros[ponto] = 100.0 * abs(fluxo - fluxo_ref) / abs(fluxo_ref)
                 else:
-                    erros[ponto] = abs(fluxo - fluxo_ref)
+                    erros[ponto] = None
             resultado['erro_fluxo_pontos'] = erros
         self.referencia_fluxo_tabela = referencia['N']
 
     def calcular_fluxos_referencia_analitica(self, solver, pontos):
         if solver.phi_ref is None:
             return {}
-        phi_ref = solver.normalizar_potencia(solver.phi_ref)
-        fluxos = {}
-        for ponto in pontos:
-            idx = int(np.argmin(np.abs(solver.x - ponto)))
-            fluxos[ponto] = float(phi_ref[idx]) if idx < len(phi_ref) else 0.0
-        return fluxos
+        values = solver.fluxo_analitico_pontos(pontos, potencia=True)
+        return dict(zip(pontos, values))
 
     def valores_resumo_tabela(self, resultado):
         return [
@@ -758,6 +798,12 @@ class DifusaoGUI_AI4PDEs:
         return sorted(set(interfaces))
     
     def atualizar_progresso(self, iteracao, max_iter, k_eff, erro_k, erro_phi):
+        # Tkinter deve ser atualizado pela thread principal. O solver roda em
+        # thread secundária para não travar a janela; por isso usamos root.after.
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, self.atualizar_progresso, iteracao, max_iter, k_eff, erro_k, erro_phi)
+            return
+
         progresso = (iteracao / max_iter) * 100
         self.progresso_var.set(progresso)
         if self.tempo_inicio_execucao is None:
@@ -805,6 +851,7 @@ class DifusaoGUI_AI4PDEs:
 
         return {
             "L": L,
+            "discretizacao": self.discretizacao_var.get().lower(),
             "N": N,
             "materiais": [dict(m) for m in self.materiais_atual],
             "cond_esquerda": esquerda,
@@ -839,6 +886,7 @@ class DifusaoGUI_AI4PDEs:
             
             self.resultados_tabela = []
             self.resultados_comparacao = []
+            self.solver_thomas = None
             self.executando = True
             self.btn_executar.config(state=tk.DISABLED)
             self.btn_relatorio.config(state=tk.DISABLED)
@@ -848,7 +896,7 @@ class DifusaoGUI_AI4PDEs:
             self.frame_progresso.config(text="Progresso 0.0% | tempo = 00:00:00")
             self.tempo_inicio_execucao = time.perf_counter()
             
-            metodo_principal = "unet_multigrid" if metodo_selecionado == "ambos" else metodo_selecionado
+            metodo_principal = "unet_multigrid"
             config_principal = dict(config)
             config_principal["metodo_fonte"] = metodo_principal
             config_principal["progress_callback"] = self.atualizar_progresso
@@ -864,13 +912,19 @@ class DifusaoGUI_AI4PDEs:
                 try:
                     k_eff, phi = self.solver.resolver(metodo_fonte=metodo_principal)
                     if metodo_selecionado == "ambos":
-                        self.resultados_comparacao = [self.solver.resumo_resultado(self.problema_var.get())]
+                        resumo_np = self.solver.resumo_resultado(self.problema_var.get())
                         cfg_thomas = dict(config)
                         cfg_thomas["metodo_fonte"] = "thomas"
                         cfg_thomas["permitir_thomas_comparacao"] = True
                         solver_thomas = SolverDifusaoAI4PDEs(**cfg_thomas)
                         solver_thomas.resolver()
-                        self.resultados_comparacao.append(solver_thomas.resumo_resultado(self.problema_var.get()))
+                        self.solver_thomas = solver_thomas
+                        resumo_thomas = solver_thomas.resumo_resultado(self.problema_var.get())
+                        erro_inf, erro_l2 = erro_forma_fluxo(self.solver.phi, solver_thomas.phi)
+                        for resumo in (resumo_np, resumo_thomas):
+                            resumo["Erro fluxo global inf"] = erro_inf
+                            resumo["Erro fluxo global L2"] = erro_l2
+                        self.resultados_comparacao = [resumo_np, resumo_thomas]
                         self.salvar_csv("resultados_comparacao.csv", self.resultados_comparacao)
                     self.root.after(0, self.finalizar_execucao, k_eff, phi, None)
                 except Exception as e:
@@ -939,6 +993,7 @@ class DifusaoGUI_AI4PDEs:
             pontos = [float(p.strip()) for p in pontos_str.split(',') if p.strip()]
             N_list = self.obter_lista_N_tabela()
             materiais = [dict(m) for m in self.materiais_atual]
+            discretizacao_tabela = self.discretizacao_var.get().lower()
             metodo_tabela = self.metodo_fonte_var.get()
             if metodo_tabela == "ambos":
                 metodo_tabela = "unet_multigrid"
@@ -960,6 +1015,8 @@ class DifusaoGUI_AI4PDEs:
         
         self.configurar_colunas_tabela()
         self.limpar_tabela()
+        self.executando = True
+        self.btn_executar.config(state=tk.DISABLED)
         self.btn_gerar_tabela.config(state=tk.DISABLED)
         self.tabela_status.config(text="Gerando tabela...")
         self.status_bar.config(text="Gerando tabela variando N...")
@@ -981,6 +1038,7 @@ class DifusaoGUI_AI4PDEs:
                         amortecimento_unet=amortecimento_unet,
                         tol_fonte=tol_fonte,
                         max_iter_fonte=max_iter_fonte,
+                        discretizacao=discretizacao_tabela,
                         metodo_fonte=metodo_tabela
                     )
                     k_eff, phi = solver.resolver(metodo_fonte=metodo_tabela)
@@ -989,6 +1047,8 @@ class DifusaoGUI_AI4PDEs:
                     
                     resultado = {
                         'N': N,
+                        'discretizacao': solver.discretizacao.upper(),
+                        'nos': N + 1,
                         'k_eff': k_eff,
                         'iteracoes': solver.iteracoes_totais,
                         'erro_k': solver.erro_k,
@@ -1018,14 +1078,19 @@ class DifusaoGUI_AI4PDEs:
                 self.root.after(0, lambda: self.status_bar.config(text="Tabela concluída."))
                 
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("Erro", f"Erro ao gerar tabela:\n{str(e)}"))
+                self.root.after(0, lambda err=str(e): messagebox.showerror("Erro", f"Erro ao gerar tabela:\n{err}"))
                 self.root.after(0, lambda: self.tabela_status.config(text="Erro na geração."))
             finally:
-                self.root.after(0, lambda: self.btn_gerar_tabela.config(state=tk.NORMAL))
+                self.root.after(0, self.finalizar_tabela)
         
         thread = threading.Thread(target=gerar)
         thread.daemon = True
         thread.start()
+
+    def finalizar_tabela(self):
+        self.executando = False
+        self.btn_executar.config(state=tk.NORMAL)
+        self.btn_gerar_tabela.config(state=tk.NORMAL)
     
     def preencher_tabela_resultados(self, pontos):
         for item in self.tree.get_children():
@@ -1045,6 +1110,30 @@ class DifusaoGUI_AI4PDEs:
         
         if modo == "fluxo":
             self.ax.plot(x, phi, 'b-', linewidth=2, label='U-Net/multigrid 1D')
+            if self.solver_thomas is not None and self.solver_thomas.phi is not None:
+                phi_th = (
+                    self.solver_thomas.phi_normalizado
+                    if self.solver_thomas.phi_normalizado is not None
+                    else self.solver_thomas.phi
+                )
+                self.ax.plot(self.solver_thomas.x, phi_th, 'k--', linewidth=2, label='Thomas')
+            if self.solver is not None and not self.solver.is_homogeneo:
+                linhas = [0.0] + self.obter_interfaces_materiais_solver() + [float(self.solver.L)]
+                for xv in sorted(set(linhas)):
+                    estilo = '-' if xv in (0.0, float(self.solver.L)) else '--'
+                    self.ax.axvline(xv, color='k', linestyle=estilo, linewidth=0.9, alpha=0.55)
+                    self.ax.text(
+                        xv,
+                        0.98,
+                        f"x={xv:g}",
+                        transform=self.ax.get_xaxis_transform(),
+                        rotation=90,
+                        va='top',
+                        ha='right',
+                        fontsize=7,
+                        alpha=0.75,
+                    )
+                self.ax.text(0.02, 0.94, 'Fronteiras e interfaces materiais', transform=self.ax.transAxes, fontsize=8)
             self.ax.set_xlabel('x [cm]')
             self.ax.set_ylabel('Fluxo φ(x)')
             self.ax.set_title('Distribuição do Fluxo')
@@ -1083,16 +1172,25 @@ class DifusaoGUI_AI4PDEs:
                 labels = [d["Método"] for d in dados]
                 tempos = [d["Tempo (s)"] for d in dados]
                 self.ax.bar(labels, tempos, color=['#2c7fb8', '#f03b20', '#31a354'][:len(labels)])
+                if any(t > 0 for t in tempos):
+                    self.ax.set_yscale('log')
                 self.ax.set_ylabel('Tempo total [s]')
                 self.ax.set_title('Comparação de tempo por método')
                 self.ax.tick_params(axis='x', rotation=15)
-                self.ax.grid(True, axis='y', alpha=0.3)
+                self.ax.grid(True, which='both', axis='y', alpha=0.3)
             else:
                 self.ax.text(0.5, 0.5, 'Execute a comparação entre métodos',
                              transform=self.ax.transAxes, ha='center', va='center')
         
         elif modo == "comparacao":
             self.ax.plot(x, phi, 'b-', linewidth=2, label='U-Net/multigrid 1D')
+            if self.solver_thomas is not None and self.solver_thomas.phi is not None:
+                phi_th = (
+                    self.solver_thomas.phi_normalizado
+                    if self.solver_thomas.phi_normalizado is not None
+                    else self.solver_thomas.phi
+                )
+                self.ax.plot(self.solver_thomas.x, phi_th, 'k--', linewidth=2, label='Thomas')
             if self.solver.is_homogeneo and self.solver.phi_ref is not None:
                 phi_ref = self.solver.phi_ref
                 if np.max(phi_ref) > 0 and np.max(phi) > 0:
@@ -1124,6 +1222,7 @@ class DifusaoGUI_AI4PDEs:
             self.ax.grid(True, alpha=0.3)
             self.ax.legend()
         
+        self.ax.set_title(self.ax.get_title() + ' / ' + self.solver.discretizacao.upper())
         self.fig.tight_layout(pad=3.0)
         self.canvas.draw()
     
@@ -1131,7 +1230,8 @@ class DifusaoGUI_AI4PDEs:
         if self.solver is None:
             return
         
-        texto = f"k_eff = {self.solver.k_eff:.8f}\n"
+        texto = f"Discretização: {self.solver.discretizacao.upper()} | N={self.solver.N} intervalos/elementos, {self.solver.N+1} nós\n"
+        texto += f"k_eff = {self.solver.k_eff:.8f}\n"
         if self.solver.k_ref:
             texto += f"Referência: {self.solver.k_ref:.8f} ({self.solver.fonte_ref})\n"
             texto += f"Erro relativo: {self.solver.erro_k:.2e} ({self.solver.erro_k*100:.4f}%)\n"
@@ -1249,6 +1349,22 @@ class DifusaoGUI_AI4PDEs:
 
                 if tipo == "fluxo":
                     ax.plot(x, phi, 'b-', linewidth=2, label='U-Net/multigrid 1D')
+                    if self.solver_thomas is not None and self.solver_thomas.phi is not None:
+                        phi_th = (
+                            self.solver_thomas.phi_normalizado
+                            if self.solver_thomas.phi_normalizado is not None
+                            else self.solver_thomas.phi
+                        )
+                        ax.plot(self.solver_thomas.x, phi_th, 'k--', linewidth=2, label='Thomas')
+                    if not self.solver.is_homogeneo:
+                        for xv in [0.0] + self.obter_interfaces_materiais_solver() + [float(self.solver.L)]:
+                            estilo = '-' if xv in (0.0, float(self.solver.L)) else '--'
+                            ax.axvline(xv, color='k', linestyle=estilo, linewidth=0.9, alpha=0.55)
+                            ax.text(
+                                xv, 0.98, f"x={xv:g}",
+                                transform=ax.get_xaxis_transform(),
+                                rotation=90, va='top', ha='right', fontsize=7, alpha=0.75,
+                            )
                     ax.set_title('Distribuição do Fluxo')
                     ax.set_xlabel('x [cm]')
                     ax.set_ylabel('Fluxo φ(x)')
@@ -1279,6 +1395,8 @@ class DifusaoGUI_AI4PDEs:
                     labels = [d["Método"] for d in dados_tempo]
                     tempos = [d["Tempo (s)"] for d in dados_tempo]
                     ax.bar(labels, tempos, color=['#2c7fb8', '#f03b20', '#31a354'][:len(labels)])
+                    if any(t > 0 for t in tempos):
+                        ax.set_yscale('log')
                     ax.set_title('Comparação de tempo por método')
                     ax.set_ylabel('Tempo total [s]')
                     ax.tick_params(axis='x', rotation=15)
@@ -1298,6 +1416,13 @@ class DifusaoGUI_AI4PDEs:
 
                 elif tipo == "comparacao":
                     ax.plot(x, phi, 'b-', linewidth=2, label='U-Net/multigrid 1D')
+                    if self.solver_thomas is not None and self.solver_thomas.phi is not None:
+                        phi_th = (
+                            self.solver_thomas.phi_normalizado
+                            if self.solver_thomas.phi_normalizado is not None
+                            else self.solver_thomas.phi
+                        )
+                        ax.plot(self.solver_thomas.x, phi_th, 'k--', linewidth=2, label='Thomas')
                     if self.solver.is_homogeneo and self.solver.phi_ref is not None:
                         phi_ref = self.solver.phi_ref
                         if np.max(phi_ref) > 0 and np.max(phi) > 0:
@@ -1340,10 +1465,18 @@ class DifusaoGUI_AI4PDEs:
                     ax.set_ylabel('Tempo total [s]')
                     ax.set_title('Escalabilidade: N vs tempo')
                     ax.set_xscale('linear')
+                    if any(t > 0 for t in tempos):
+                        ax.set_yscale('log')
                     ax.set_xticks(Ns)
                     ax.set_xticklabels([str(n) for n in Ns], rotation=30, ha='right')
 
+                if ax.get_xlabel() == 'N':
+                    ax.xaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
                 ax.grid(True, alpha=0.3)
+                discr_figura = (self.resultados_tabela[0]['discretizacao']
+                                if tipo in ('tabela_N', 'escalabilidade') and self.resultados_tabela
+                                else self.solver.discretizacao.upper())
+                ax.set_title(ax.get_title() + ' / ' + discr_figura)
                 fig.tight_layout()
                 temp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
                 temp.close()
@@ -1352,7 +1485,7 @@ class DifusaoGUI_AI4PDEs:
                 return temp.name
 
             story.append(Paragraph("Relatório do Solver de Difusão de Nêutrons 1D", titulo_style))
-            story.append(Paragraph("Neural Physics/AI4PDEs com stencils convolucionais fixos", styles['Heading2']))
+            story.append(Paragraph('Neural Physics/U-Net multigrid / ' + self.solver.discretizacao.upper(), styles['Heading2']))
             story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", styles['Normal']))
             story.append(Spacer(1, 20))
 
@@ -1373,6 +1506,7 @@ class DifusaoGUI_AI4PDEs:
             story.append(PageBreak())
 
             story.append(Paragraph("1. Metodologia Computacional", styles['Heading2']))
+            story.append(Paragraph(self.solver.descricao_discretizacao(), styles['Normal']))
             story.append(Paragraph(
                 "O resolvedor implementa uma abordagem inspirada em Neural Physics/AI4PDEs, "
                 "usando operadores discretos como stencils convolucionais com pesos fixos, sem treinamento.",
@@ -1387,7 +1521,7 @@ class DifusaoGUI_AI4PDEs:
             ))
             story.append(Paragraph(
                 "O problema de fonte fixa Aφ = S é tratado por aplicação de um operador conservativo local em PyTorch, "
-                "suavização iterativa de Jacobi, restrição full-weighting, prolongamento por interpolação "
+                "suavização iterativa de Jacobi, restrição compatível com a discretização, prolongamento por interpolação "
                 "linear e operadores rediscretizados em um ciclo U-Net/multigrid geométrico. "
                 "No nível mais grosso, a correção também é obtida por suavizações de Jacobi, "
                 "sem solver direto clássico dentro do método U-Net/multigrid.",
@@ -1405,7 +1539,10 @@ class DifusaoGUI_AI4PDEs:
             dados = [
                 ["Parâmetro", "Valor"],
                 ["Comprimento (L)", f"{self.solver.L:.2f} cm"],
-                ["Número de Pontos (N)", str(self.solver.N)],
+                ["Discretização", self.solver.discretizacao.upper()],
+                ["Intervalos / elementos (N)", str(self.solver.N)],
+                ["Nós", str(self.solver.N + 1)],
+                ["Precisão dos operadores", str(self.solver.dtype)],
                 ["Tipo", "Homogêneo" if is_homogeneo else "Heterogêneo"],
                 ["Condição Esquerda", self.solver.cond_esquerda.capitalize()],
                 ["Condição Direita", self.solver.cond_direita.capitalize()],
@@ -1430,6 +1567,10 @@ class DifusaoGUI_AI4PDEs:
                 ["PyTorch disponível", f"Sim ({torch.__version__})"],
                 ["CUDA disponível", "Sim" if self.solver.cuda_disponivel else "Não"],
                 ["Método executado", self.solver.metodo_executado],
+                ["Tempo de montagem", f"{self.solver.tempos_detalhados.get('tempo_montagem_total_s', 0.0):.6f} s"],
+                ["Tempo de transferência", f"{self.solver.tempos_detalhados.get('tempo_transferencia_total_s', 0.0):.6f} s"],
+                ["Tempo de iteração numérica", f"{self.solver.tempos_detalhados.get('tempo_iteracao_numerica_s', 0.0):.6f} s"],
+                ["Tempo da fonte fixa", f"{self.solver.tempos_detalhados.get('tempo_fonte_fixa_s', 0.0):.6f} s"],
                 ["Tempo total", f"{self.solver.tempo_total:.6f} s"],
                 ["Tempo médio por iteração", f"{self.solver.tempo_medio_iteracao:.6f} s"],
             ]
@@ -1468,22 +1609,22 @@ class DifusaoGUI_AI4PDEs:
             if self.resultados_comparacao:
                 story.append(Spacer(1, 12))
                 story.append(Paragraph("4.1 Comparação enxuta com Thomas", styles['Heading2']))
-                cab = ["Método", "k_eff", "Erro k (%)", "Iter. externas",
-                       "Iter. fonte média", "Fonte conv.", "Falhas", "Tempo (s)"]
+                cab = ["Método", "k_eff", "Erro k (%)", "Erro φ∞",
+                       "Erro φL2", "Iter.", "Fonte conv.", "Tempo (s)"]
                 dados_cmp = [cab]
                 for r in self.resultados_comparacao:
                     dados_cmp.append([
                         r["Método"],
                         f"{r['k_eff']:.8f}",
                         f"{r['Erro k (%)']:.4e}" if r["Erro k (%)"] is not None else "N/A",
+                        f"{r.get('Erro fluxo global inf', 0.0):.4e}",
+                        f"{r.get('Erro fluxo global L2', 0.0):.4e}",
                         str(r["Iter. externas"]),
-                        f"{r['Iter. fonte média']:.2f}",
                         "sim" if r.get("Fonte fixa convergiu (todas as chamadas)", True) else "não",
-                        str(r.get("Chamadas fonte fixa não convergidas", 0)),
                         f"{r['Tempo (s)']:.4f}",
                     ])
-                col_widths_cmp = [3.0*cm, 2.0*cm, 1.8*cm, 1.7*cm,
-                                  2.1*cm, 1.5*cm, 1.2*cm, 1.6*cm]
+                col_widths_cmp = [2.7*cm, 1.8*cm, 1.6*cm, 1.5*cm,
+                                  1.5*cm, 1.1*cm, 1.4*cm, 1.4*cm]
                 story.append(estilo_tabela(Table(celulas_tabela(dados_cmp, font_size=7), colWidths=col_widths_cmp, repeatRows=1)))
                 story.append(Image(salvar_figura("tempo_metodo"), width=15*cm, height=7*cm))
             story.append(PageBreak())
@@ -1528,7 +1669,11 @@ class DifusaoGUI_AI4PDEs:
                 for ponto, erro in self.solver.erro_phi_pontos.items():
                     idx = np.argmin(np.abs(self.solver.x - ponto))
                     fluxo_val = self.solver.phi[idx] if idx < len(self.solver.phi) else 0.0
-                    dados_pontos.append([f"{ponto:.2f}", f"{fluxo_val:.6e}", f"{erro:.4e}"])
+                    dados_pontos.append([
+                        f"{ponto:.2f}",
+                        f"{fluxo_val:.6e}",
+                        f"{erro:.4e}" if erro is not None else "N/A (ref.=0)",
+                    ])
                 story.append(estilo_tabela(Table(celulas_tabela(dados_pontos, font_size=7), colWidths=[3*cm, 3*cm, 3*cm])))
 
             story.append(PageBreak())
@@ -1538,6 +1683,8 @@ class DifusaoGUI_AI4PDEs:
             story.append(Spacer(1, 20))
             story.append(Paragraph("8. Resultados para Diferentes Malhas (N)", styles['Heading2']))
             if self.resultados_tabela:
+                story.append(Paragraph('Discretização da tabela: '
+                                       + self.resultados_tabela[0]['discretizacao'], styles['Normal']))
                 cabecalho = ["N", "x", "k_eff", "Iterações", "Erro_k (%)", "Fluxo",
                              "Erro fluxo", "Fonte conv.", "Falhas", "Tempo (s)"]
                 dados_tabela = [cabecalho]
@@ -1651,6 +1798,10 @@ class DifusaoGUI_AI4PDEs:
             "não altera o autovalor. Para interpretação física, o fluxo pode ser posteriormente normalizado por potência.",
             "",
             "## Configuração do problema principal",
+            f"- Discretização: {self.solver.discretizacao.upper()}",
+            f"- Formulação: {self.solver.descricao_discretizacao()}",
+            f"- Nós: {self.solver.N + 1}",
+            f"- Precisão: {self.solver.dtype}",
             f"- Comprimento L (cm): {self.solver.L:.6g}",
             f"- N: {self.solver.N}",
             f"- Tipo: {'Homogêneo' if self.solver.is_homogeneo else 'Heterogêneo'}",
@@ -1682,6 +1833,10 @@ class DifusaoGUI_AI4PDEs:
             f"- Fonte fixa convergiu em todas as chamadas: {'sim' if self.solver.convergiu_fonte_fixa and all(self.solver.convergiu_fonte_fixa) else 'não'}",
             f"- Chamadas de fonte fixa não convergidas: {sum(1 for ok in self.solver.convergiu_fonte_fixa if not ok)}",
             f"- Bateu max_iter externo: {'sim' if not self.solver.convergiu else 'não'}",
+            f"- Tempo de montagem (s): {self.solver.tempos_detalhados.get('tempo_montagem_total_s', 0.0):.6f}",
+            f"- Tempo de transferência (s): {self.solver.tempos_detalhados.get('tempo_transferencia_total_s', 0.0):.6f}",
+            f"- Tempo de iteração numérica (s): {self.solver.tempos_detalhados.get('tempo_iteracao_numerica_s', 0.0):.6f}",
+            f"- Tempo da fonte fixa (s): {self.solver.tempos_detalhados.get('tempo_fonte_fixa_s', 0.0):.6f}",
             f"- Tempo total (s): {self.solver.tempo_total:.6f}",
             "",
         ]
@@ -1689,16 +1844,18 @@ class DifusaoGUI_AI4PDEs:
             linhas.extend([
                 "## Comparação enxuta com Thomas",
                 "",
-                "| Método | k_eff | Erro k (%) | Iter. externas | Iter. fonte média | Fonte conv. | Falhas | Tempo (s) |",
+                "| Método | k_eff | Erro k (%) | Erro φ∞ | Erro φL2 | Iter. externas | Fonte conv. | Tempo (s) |",
                 "|---|---:|---:|---:|---:|---:|---:|---:|",
             ])
             for r in self.resultados_comparacao:
                 linhas.append(
                     f"| {r['Método']} | {r['k_eff']:.8f} | "
                     f"{r['Erro k (%)'] if r['Erro k (%)'] is not None else 'N/A'} | "
-                    f"{r['Iter. externas']} | {r['Iter. fonte média']:.2f} | "
+                    f"{r.get('Erro fluxo global inf', 0.0):.4e} | "
+                    f"{r.get('Erro fluxo global L2', 0.0):.4e} | "
+                    f"{r['Iter. externas']} | "
                     f"{r.get('Fonte fixa convergiu (todas as chamadas)', True)} | "
-                    f"{r.get('Chamadas fonte fixa não convergidas', 0)} | {r['Tempo (s)']:.4f} |"
+                    f"{r['Tempo (s)']:.4f} |"
                 )
         linhas.extend([
             "",
@@ -1711,4 +1868,3 @@ class DifusaoGUI_AI4PDEs:
         with open(arquivo, "w", encoding="utf-8") as f:
             f.write("\n".join(linhas))
         messagebox.showinfo("Sucesso", f"Relatório Markdown salvo em:\n{arquivo}")
-
