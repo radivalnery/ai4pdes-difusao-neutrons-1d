@@ -5,6 +5,84 @@ filosofia AI4PDEs/Neural Physics. O metodo principal usa operadores discretos
 fixos em PyTorch, suavizacao de Jacobi e ciclo U-Net/multigrid geometrico, sem
 treinamento de pesos.
 
+## Versao MDF + MEF (v4.2)
+
+A interface Tkinter e o arquivo unico permitem **marcar MDF, MEF ou ambos**.
+Os parametros fisicos, N, precisao e tolerancias sao comuns aos perfis.
+Escolha o modo **Sequencial** ou **Paralelo** e clique em **Executar selecionados**.
+A opcao separada **Incluir referencia Thomas** e somente verificacao numerica
+externa de cada discretizacao; nao troca o resolvedor principal.
+
+```powershell
+python main.py
+# Mesmo programa, em um arquivo unico detalhado:
+python difusao_neutrons_neuralphysics_1d_mdf_mef_v4_2.py
+```
+
+Na GUI, selecione o problema, marque as discretizacoes e configure os parametros.
+O MEF usa elementos lineares P1 de Galerkin, massa consistente e
+integracao dos materiais por elemento. N significa intervalos/elementos;
+ha N+1 nos. O contorno chamado vacuo representa fluxo nulo, como no MDF.
+
+| Modo na GUI | Execucao | Interpretacao dos tempos |
+|---|---|---|
+| Sequencial (padrao) | Um perfil apos o outro, automaticamente | Sem concorrencia dos perfis desta campanha |
+| Paralelo | Dois trabalhadores independentes, um MDF e outro MEF | CPU/GPU compartilhados; nao mede desempenho isolado |
+
+O modo paralelo exige confirmacao do aviso quando ambos estao marcados.
+Com apenas um perfil, a execucao e sequencial, mesmo se Paralelo foi solicitado.
+Nenhum desses modos altera o multigrid ou o numero global de threads do PyTorch.
+
+A aba **Execucoes** mostra estado, iteracao, k_eff e tempos por configuracao.
+Os graficos sobrepoem MDF/MEF e suas referencias opcionais. A tabela possui
+uma linha por **(discretizacao, N, x)**. Gerar Tabela (N) respeita os mesmos
+perfis e modo selecionados; cada erro heterogeneo usa a referencia de malha
+da sua propria discretizacao, nunca o fluxo da outra.
+
+As configuracoes sao capturadas no inicio e os campos ficam bloqueados durante
+a campanha. Alteracoes posteriores no formulario nao mudam o relatorio salvo.
+
+Para gerar CSVs, figuras, tabelas LaTeX e relatorio PDF/Markdown sem a GUI:
+
+```powershell
+python main.py --experimento-artigo --discretizacao mef --saida resultados_mef
+python main.py --experimento-artigo --discretizacao mdf --saida resultados_mdf
+# Executar e consolidar as duas campanhas:
+python main.py --experimento-artigo --discretizacao ambos --saida resultados_mdf_mef
+```
+
+Com `--discretizacao ambos`, cada campanha fica em `mdf/` e `mef/`, com seus
+relatorios e figuras; os CSVs reunidos ficam em `csv/` na pasta de saida.
+O PDF consolidado fica em `relatorios/relatorio_experimental.pdf`.
+O arquivo unico aceita exatamente os mesmos argumentos.
+O modo de artigo da CLI continua sequencial; o seletor Paralelo pertence a GUI.
+Para abrir a GUI com os dois perfis ja marcados: `python main.py --gui --discretizacao ambos`.
+
+| Caso | Valores de N | Posicoes x (cm) |
+|---|---|---|
+| Homogeneo | 1, 13, 26, 52, 100, 104 | 0, 13, 26 |
+| Heterogeneo | 3, 12, 48, 96, 192, 300, 384 | 0, 50, 100, 150 |
+
+Teste curto de funcionamento (nao serve como resultado convergido para artigo):
+
+```powershell
+python main.py --experimento-artigo --discretizacao mef --malhas-homogeneo 13 --malhas-heterogeneo 12 --max-iter 2 --max-fonte 5 --saida resultados_smoke_mef
+```
+
+Os CSVs registram convergencia, discretizacao, precisao e tempos separados.
+MDF e MEF agora usam o **mesmo banco Conv1d fixo, ciclo V, hierarquia geometrica,
+transferencias e precisao** (float64 por padrao; `--precisao float32` para ambos).
+Mudam os coeficientes de A/F: MDF conservativo ou MEF P1 de massa consistente.
+O escalonamento H^-1 do MEF permite uma convencao comum de residuos sem
+alterar o problema de autovalor nem concentrar a massa. A mesma tolerancia
+nao implica o mesmo erro de discretizacao ou o mesmo numero de ciclos.
+Fonte fixa e uma parcela do tempo de iteracao: nao some as duas colunas.
+
+As versoes unicas v4.0/v4.1 permanecem preservadas. O estado MDF anterior ao
+MEF esta marcado por `mdf-v4.1-pre-mef`; o desenvolvimento e feito na branch
+`codex/adicionar-mef` do mesmo repositorio. Backups locais ficam em `backups/`.
+Consulte [a descricao detalhada](docs/MDF_MEF_v4_2.md) para formulas e validacao.
+
 ## Objetivo
 
 Resolver problemas de autovalor da difusao de neutrons em geometria slab 1D, com
@@ -40,6 +118,12 @@ src/neutron_ai4pdes/
   gui.py                        frontend Tkinter, graficos e relatorio
   solver.py                     backend numerico do problema de autovalor
   models.py                     operador discreto e solver de fonte fixa
+  campaigns.py                  filas MDF/MEF sequenciais ou concorrentes
+  plots.py                      graficos compartilhados pela GUI e PDF
+  stencils.py                   banco Conv1d e transferencias comuns MDF/MEF
+  fem.py                        montagem MEF P1, massa consistente
+  metrics.py                    erros globais de forma do fluxo
+  experiments.py                campanhas sem GUI e exportacao para artigo
   references.py                 formulas e solucoes de referencia
   method.py                     descricao do metodo Neural Physics/AI4PDEs 1D
 ```
@@ -58,13 +142,13 @@ python main.py
 
 ## Disponibilidade do Codigo
 
-O codigo-fonte do projeto esta organizado para disponibilizacao publica em:
+O codigo-fonte do projeto esta disponivel publicamente em:
 
 ```text
 https://github.com/radivalnery/ai4pdes-difusao-neutrons-1d
 ```
 
-Na versao do artigo, o arquivo principal de reproducao dos experimentos e:
+Para reproduzir a versao MDF anterior do artigo (v4.1):
 
 ```bash
 python difusao_neutrons_neuralphysics_1d_thomas_couto_v4_1.py --experimento-artigo --saida resultados_artigo_v4_1
@@ -73,9 +157,9 @@ python difusao_neutrons_neuralphysics_1d_thomas_couto_v4_1.py --experimento-arti
 Esse comando gera automaticamente as pastas `csv/`, `figuras/`,
 `figuras_artigo/`, `tabelas_latex/` e `relatorios/` dentro da pasta de saida.
 
-## Versao Unica para Envio
+## Versoes Anteriores MDF
 
-Tambem foram gerados arquivos unicos para envio e reproducao:
+Os arquivos unicos anteriores continuam preservados para reproducao:
 
 ```bash
 python difusao_neutrons_neuralphysics_1d_comparativo_v4_0.py
@@ -96,7 +180,13 @@ A versao `v4_1` inclui:
 Na interface, as planilhas CSV sao salvas na pasta de execucao do programa:
 
 - `resultados_refinamento.csv`;
-- `resultados_comparacao.csv`, apenas quando a opcao de comparacao com Thomas e usada.
+- `resultados_comparacao.csv`, com todos os perfis/resolvedores executados;
+- `configuracao_execucao.json`, com os parametros capturados, modos solicitado/
+  efetivo, tempo de parede, aviso dos tempos e falhas registradas.
+
+Esses arquivos correspondem a ultima campanha da GUI e sao atualizados ao final.
+No paralelo, nao some os tempos individuais para obter o tempo da campanha.
+O relatorio PDF/Markdown inclui os perfis executados, tempos separados e o aviso.
 
 No modo `--experimento-artigo`, os arquivos principais sao:
 
