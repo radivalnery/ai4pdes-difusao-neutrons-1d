@@ -660,7 +660,7 @@ class SolverDifusaoAI4PDEs:
         'homogeneo': {'k_eff': None, 'fonte': 'Analítica'},
         'heterogeneo': {'k_eff': 1.09506, 'fonte': 'Couto (2003)'}
     }
-    
+
     def __init__(self, L, N, materiais, cond_esquerda='reflexiva', cond_direita='vácuo',
                  tol_k=1e-6, tol_phi=1e-5, max_iter=1000, potencia_nominal=100.0,
                  pontos_interesse=None, progress_callback=None, dispositivo_preferido='auto',
@@ -668,7 +668,7 @@ class SolverDifusaoAI4PDEs:
                  tol_fonte=None, max_iter_fonte=5000,
                  metodo_fonte="unet_multigrid", guardar_historicos_fonte=False,
                  permitir_thomas_comparacao=False, discretizacao='mdf'):
-        
+
         self.discretizacao = str(discretizacao).lower()
         if self.discretizacao not in ('mdf', 'mef'):
             raise ValueError('Discretizacao deve ser mdf ou mef.')
@@ -699,12 +699,12 @@ class SolverDifusaoAI4PDEs:
         self.metodo_fonte = metodo_fonte
         self.guardar_historicos_fonte = guardar_historicos_fonte
         self.permitir_thomas_comparacao = bool(permitir_thomas_comparacao)
-        
+
         self.materiais = materiais
         self.D_arr = np.zeros(N+1)
         self.Sigma_a_arr = np.zeros(N+1)
         self.nuSigma_f_arr = np.zeros(N+1)
-        
+
         for i, x in enumerate(self.x):
             for mat in materiais:
                 if mat['inicio'] <= x <= mat['fim']:
@@ -712,7 +712,7 @@ class SolverDifusaoAI4PDEs:
                     self.Sigma_a_arr[i] = mat['Sigma_a']
                     self.nuSigma_f_arr[i] = mat['nuSigma_f']
                     break
-        
+
         self.cuda_disponivel = bool(torch.cuda.is_available())
         if dispositivo_preferido == 'cpu':
             self.device = torch.device('cpu')
@@ -736,7 +736,7 @@ class SolverDifusaoAI4PDEs:
         self.convergiu_fonte_fixa = []
         self.historico_residuo_fonte_ultima_chamada = []
         self.historicos_residuo_fonte = []
-        
+
         self.k_eff = None
         self.phi = None
         self.phi_normalizado = None
@@ -759,7 +759,7 @@ class SolverDifusaoAI4PDEs:
             "tempo_total_s": 0.0,
             "tempo_medio_iteracao_s": 0.0,
         }
-        
+
         self.iteracoes_totais = 0
         self.convergiu = False
         self.erro_k = 0.0
@@ -824,7 +824,7 @@ class SolverDifusaoAI4PDEs:
             except Exception:
                 return "GPU CUDA"
         return platform.processor() or platform.machine() or "CPU"
-    
+
     def criar_operador_A(self):
         inicio_operador = time.perf_counter()
         if self.discretizacao == 'mef':
@@ -855,7 +855,7 @@ class SolverDifusaoAI4PDEs:
             "Adaptação 1D Neural Physics/AI4PDEs: operadores convolucionais fixos "
             "e ciclo U-Net/multigrid geométrico sem treinamento"
         )
-    
+
     def resolver_fonte_fixa_unet(self, S, chute=None):
         if self.solver_fonte_fixa is None:
             raise RuntimeError("O resolvedor de fonte fixa ainda não foi criado.")
@@ -911,13 +911,13 @@ class SolverDifusaoAI4PDEs:
         if metodo == "thomas":
             return self.resolver_fonte_fixa_thomas(S)
         raise ValueError(f"Método de fonte fixa desconhecido: {metodo}")
-    
+
     def calcular_integral(self, f):
         integral = 0.5 * (f[0] + f[-1])
         integral += np.sum(f[1:-1])
         integral *= self.h
         return integral
-    
+
     def calcular_referencias(self):
         if self.is_homogeneo:
             D = self.D_arr[0]
@@ -926,7 +926,7 @@ class SolverDifusaoAI4PDEs:
             self.k_ref = calcular_k_eff_analitico(D, Sigma_a, nuSigma_f, self.L,
                                                   self.cond_esquerda, self.cond_direita)
             self.fonte_ref = 'Analítica (fórmula)'
-            self.phi_ref = fluxo_analitico_homogeneo(self.x, self.L, 
+            self.phi_ref = fluxo_analitico_homogeneo(self.x, self.L,
                                                      self.cond_esquerda, self.cond_direita)
             if np.max(self.phi_ref) > 0:
                 self.phi_ref = self.phi_ref / np.max(self.phi_ref)
@@ -934,7 +934,7 @@ class SolverDifusaoAI4PDEs:
             self.k_ref = self.REFERENCIAS['heterogeneo']['k_eff']
             self.fonte_ref = self.REFERENCIAS['heterogeneo']['fonte']
             self.phi_ref = None
-    
+
     def normalizar_potencia(self, phi):
         P_atual = 3.2e-11 * (self.integral_fissao(phi) if self.discretizacao == 'mef'
                             else np.sum(self.nuSigma_f_arr * phi * self.h))
@@ -954,7 +954,7 @@ class SolverDifusaoAI4PDEs:
             values = values * normalized[index] / self.phi_ref[index]
         values[np.abs(values) <= 1e-12 * max(np.max(np.abs(values)), 1.)] = 0.
         return values
-    
+
     def resolver(self, metodo_fonte=None):
         if metodo_fonte is not None:
             self.metodo_fonte = metodo_fonte
@@ -1003,7 +1003,7 @@ class SolverDifusaoAI4PDEs:
         self.metodo_executado = (
             f"{self.nome_metodo(self.metodo_fonte)} / {self.discretizacao.upper()} aplicado ao problema de fonte fixa"
         )
-        
+
         print("\n" + "="*60)
         print("SOLVER DE DIFUSÃO DE NÊUTRONS COM AI4PDEs 1D ADAPTADO")
         print("="*60)
@@ -1014,9 +1014,9 @@ class SolverDifusaoAI4PDEs:
         if self.k_ref:
             print(f"k_ref: {self.k_ref:.8f} ({self.fonte_ref})")
         print("="*60)
-        
+
         tempo_inicio_solver = time.perf_counter()
-        
+
         for iteracao in range(1, self.max_iter + 1):
             inicio_iter = time.perf_counter()
             inicio_preparacao = time.perf_counter()
@@ -1043,34 +1043,34 @@ class SolverDifusaoAI4PDEs:
                 )
                 break
             phi_novo = self._numpy(phi_novo_tensor)
-            
+
             inicio_atualizacao = time.perf_counter()
             integral_novo = self.integral_fissao(phi_novo)
             integral_antigo = self.integral_fissao(phi)
             if abs(integral_antigo) < 1e-30:
                 raise ValueError("Integral da fonte muito pequena")
             k_eff_novo = k_eff * (integral_novo / integral_antigo)
-            
+
             max_phi = np.max(phi_novo)
             if max_phi > 0:
                 phi_novo = phi_novo / max_phi
-            
+
             erro_k = abs(k_eff_novo - k_eff) / abs(k_eff_novo) if abs(k_eff_novo) > 0 else 1.0
             erro_phi = np.max(np.abs(phi_novo - phi)) / (np.max(np.abs(phi_novo)) + 1e-15)
             self.erro_phi_iterativo = float(erro_phi)
             self.tempos_detalhados["tempo_atualizacao_potencia_s"] += time.perf_counter() - inicio_atualizacao
-            
+
             self.historico_k.append(k_eff_novo)
             if iteracao % 10 == 0 or iteracao == 1:
                 self.historico_phi.append(phi_novo.copy())
             self.tempos_iteracao.append(time.perf_counter() - inicio_iter)
-            
+
             phi = phi_novo
             k_eff = k_eff_novo
-            
+
             if self.progress_callback:
                 self.progress_callback(iteracao, self.max_iter, k_eff, erro_k, erro_phi)
-            
+
             if iteracao % 10 == 0 or iteracao == 1:
                 status_fonte = "ok" if self.convergiu_fonte_fixa[-1] else "max_iter_fonte"
                 print(f"Iteração {iteracao:4d}: k_eff = {k_eff:.8f}, "
@@ -1083,12 +1083,12 @@ class SolverDifusaoAI4PDEs:
                 print(f"\nCONVERGÊNCIA ALCANÇADA em {iteracao} iterações!")
                 print(f"k_eff = {k_eff:.8f}")
                 break
-        
+
         if not self.convergiu:
             if self.iteracoes_totais <= 0:
                 self.iteracoes_totais = self.max_iter
             print(f"\nNão convergiu após {self.iteracoes_totais} iterações")
-        
+
         self.tempos_detalhados["tempo_loop_iterativo_s"] = time.perf_counter() - tempo_inicio_solver
         self.tempos_detalhados["tempo_montagem_total_s"] = (
             self.tempos_detalhados["tempo_montagem_operador_s"]
@@ -1113,16 +1113,16 @@ class SolverDifusaoAI4PDEs:
         self.tempos_detalhados["tempo_medio_iteracao_s"] = self.tempo_medio_iteracao
         self.k_eff = k_eff
         self.phi = phi
-        
+
         if self.k_ref:
             self.erro_k = abs(self.k_eff - self.k_ref) / abs(self.k_ref)
-        
+
         if self.phi_ref is not None:
             for ponto, val_ref in zip(self.pontos_interesse, self.fluxo_analitico_pontos(self.pontos_interesse)):
                 val_calc = np.interp(ponto, self.x, self.phi)
                 self.erro_phi_pontos[ponto] = (abs(val_calc-val_ref)/abs(val_ref)
                                               if abs(val_ref) > 1e-12 else None)
-        
+
         erros_validos = [v for v in self.erro_phi_pontos.values() if v is not None]
         self.erro_phi_max = (
             float(np.max(erros_validos))
@@ -1225,7 +1225,7 @@ class DifusaoGUI_AI4PDEs:
         self.root = root
         self.root.title("Solver de Difusão de Nêutrons 1D - Neural Physics 1D adaptado")
         self.root.state('zoomed')
-        
+
         self.solver = None
         self.solver_thomas = None
         self.executando = False
@@ -1233,11 +1233,11 @@ class DifusaoGUI_AI4PDEs:
         self.resultados_comparacao = []
         self.modo_grafico = tk.StringVar(value="fluxo")
         self.tempo_inicio_execucao = None
-        
+
         self.problemas = {
             'Homogêneo (Lamarsh)': {
                 'L': 26.0, 'N': 100,
-                'materiais': [{'inicio': 0.0, 'fim': 26.0, 'D': 0.9, 
+                'materiais': [{'inicio': 0.0, 'fim': 26.0, 'D': 0.9,
                               'Sigma_a': 0.065, 'nuSigma_f': 0.0681}],
                 'esquerda': 'reflexiva', 'direita': 'vácuo',
                 'potencia': 100.0,
@@ -1247,11 +1247,11 @@ class DifusaoGUI_AI4PDEs:
             'Heterogêneo (Couto, 2003)': {
                 'L': 150.0, 'N': 300,
                 'materiais': [
-                    {'inicio': 0.0, 'fim': 50.0, 'D': 1.333333, 
+                    {'inicio': 0.0, 'fim': 50.0, 'D': 1.333333,
                      'Sigma_a': 0.200000, 'nuSigma_f': 0.220000},
-                    {'inicio': 50.0, 'fim': 100.0, 'D': 1.333333, 
+                    {'inicio': 50.0, 'fim': 100.0, 'D': 1.333333,
                      'Sigma_a': 0.240000, 'nuSigma_f': 0.250000},
-                    {'inicio': 100.0, 'fim': 150.0, 'D': 2.777777, 
+                    {'inicio': 100.0, 'fim': 150.0, 'D': 2.777777,
                      'Sigma_a': 0.110000, 'nuSigma_f': 0.080000}
                 ],
                 'esquerda': 'reflexiva', 'direita': 'vácuo',
@@ -1260,60 +1260,60 @@ class DifusaoGUI_AI4PDEs:
                 'malhas_tabela': [3, 12, 48, 96, 192, 300, 384],
             }
         }
-        
+
         self.materiais_atual = []
         self.pontos_interesse = [0.0, 50.0, 100.0, 150.0]
         self.potencia_nominal = 100.0
-        
+
         self.criar_widgets()
         self.carregar_problema('Homogêneo (Lamarsh)')
-    
+
     def criar_widgets(self):
         # Configurar grid principal
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
-        
+
         self.frame_principal = ttk.Frame(self.root)
         self.frame_principal.grid(row=0, column=0, sticky=tk.N+tk.S+tk.E+tk.W)
         self.frame_principal.grid_rowconfigure(0, weight=1)
         self.frame_principal.grid_columnconfigure(1, weight=3)
-        
+
         # ========== PAINEL ESQUERDO ==========
         self.painel_controles = ttk.LabelFrame(self.frame_principal, text="Controles", padding=8)
         self.painel_controles.grid(row=0, column=0, sticky=tk.N+tk.S+tk.W, padx=5, pady=5)
         self.painel_controles.grid_rowconfigure(30, weight=1)
-        
+
         self.criar_controles()
         self.criar_barra_progresso()
-        
+
         # ========== PAINEL DIREITO ==========
         self.painel_direito = ttk.Frame(self.frame_principal)
         self.painel_direito.grid(row=0, column=1, sticky=tk.N+tk.S+tk.E+tk.W, padx=5, pady=5)
         self.painel_direito.grid_rowconfigure(0, weight=1)
         self.painel_direito.grid_columnconfigure(0, weight=1)
-        
+
         self.notebook = ttk.Notebook(self.painel_direito)
         self.notebook.grid(row=0, column=0, sticky=tk.N+tk.S+tk.E+tk.W, pady=(0, 5))
-        
+
         # ----- Aba Gráfico -----
         self.aba_grafico = ttk.Frame(self.notebook)
         self.notebook.add(self.aba_grafico, text="Gráfico")
         self.aba_grafico.grid_rowconfigure(0, weight=1)
         self.aba_grafico.grid_rowconfigure(1, weight=0)
         self.aba_grafico.grid_columnconfigure(0, weight=1)
-        
+
         self.fig = Figure(figsize=(10, 8), dpi=110)
         self.ax = self.fig.add_subplot(111)
         self.fig.tight_layout(pad=4.0)
-        
+
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.aba_grafico)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky=tk.N+tk.S+tk.E+tk.W, padx=5, pady=5)
-        
+
         toolbar_frame = ttk.Frame(self.aba_grafico)
         toolbar_frame.grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
         self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
         self.toolbar.update()
-        
+
         frame_modo = ttk.Frame(self.aba_grafico)
         frame_modo.grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Label(frame_modo, text="Visualização:").pack(side=tk.LEFT, padx=5)
@@ -1323,26 +1323,26 @@ class DifusaoGUI_AI4PDEs:
         for texto, valor in modos:
             ttk.Radiobutton(frame_modo, text=texto, variable=self.modo_grafico,
                            value=valor, command=self.atualizar_grafico).pack(side=tk.LEFT, padx=5)
-        
+
         self.frame_resultados = ttk.LabelFrame(self.aba_grafico, text="Resultados", padding=5)
         self.frame_resultados.grid(row=3, column=0, sticky=tk.W+tk.E, pady=5)
         self.texto_resultados = scrolledtext.ScrolledText(self.frame_resultados, height=3)
         self.texto_resultados.pack(fill=tk.X)
-        
+
         # ----- Aba Tabelas -----
         self.aba_tabelas = ttk.Frame(self.notebook)
         self.notebook.add(self.aba_tabelas, text="Tabelas")
         self.aba_tabelas.grid_rowconfigure(0, weight=1)
         self.aba_tabelas.grid_columnconfigure(0, weight=1)
-        
+
         self.tabela_frame = ttk.LabelFrame(self.aba_tabelas, text="Resultados para diferentes N", padding=5)
         self.tabela_frame.grid(row=0, column=0, sticky=tk.N+tk.S+tk.E+tk.W, padx=5, pady=5)
         self.tabela_frame.grid_rowconfigure(0, weight=1)
         self.tabela_frame.grid_columnconfigure(0, weight=1)
-        
+
         colunas = self.montar_colunas_tabela()
         self.tree = ttk.Treeview(self.tabela_frame, columns=colunas, show='headings', height=15)
-        
+
         scrollbar = ttk.Scrollbar(self.tabela_frame, orient=tk.VERTICAL, command=self.tree.yview)
         scrollbar_x = ttk.Scrollbar(self.tabela_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=scrollbar_x.set)
@@ -1350,7 +1350,7 @@ class DifusaoGUI_AI4PDEs:
         scrollbar.grid(row=0, column=1, sticky=tk.N+tk.S)
         scrollbar_x.grid(row=1, column=0, sticky=tk.E+tk.W)
         self.configurar_colunas_tabela()
-        
+
         # ============================================================
         # BOTÕES DA TABELA - AQUI ESTÃO OS BOTÕES
         # ============================================================
@@ -1361,34 +1361,34 @@ class DifusaoGUI_AI4PDEs:
         self.N_tabela_entry = ttk.Entry(frame_botoes_tabela, width=28)
         self.N_tabela_entry.pack(side=tk.LEFT, padx=2)
         self.N_tabela_entry.insert(0, "1, 13, 26, 52, 100, 104")
-        
-        self.btn_gerar_tabela = ttk.Button(frame_botoes_tabela, text="📊 Gerar Tabela (N)", 
+
+        self.btn_gerar_tabela = ttk.Button(frame_botoes_tabela, text="📊 Gerar Tabela (N)",
                                           command=self.gerar_tabela_variando_N_thread)
         self.btn_gerar_tabela.pack(side=tk.LEFT, padx=2)
-        
-        ttk.Button(frame_botoes_tabela, text="Limpar Tabela", 
+
+        ttk.Button(frame_botoes_tabela, text="Limpar Tabela",
                   command=self.limpar_tabela).pack(side=tk.LEFT, padx=2)
-        
+
         self.tabela_status = ttk.Label(self.tabela_frame, text="")
         self.tabela_status.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=2)
-        
+
         # ----- Aba Ajuda -----
         self.aba_ajuda = ttk.Frame(self.notebook)
         self.notebook.add(self.aba_ajuda, text="Ajuda")
         self.texto_ajuda = scrolledtext.ScrolledText(self.aba_ajuda, wrap=tk.WORD, font=('Courier New', 10))
         self.texto_ajuda.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.criar_ajuda()
-        
+
         # Status
         self.status_bar = ttk.Label(self.root, text="Pronto", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.grid(row=1, column=0, sticky=tk.W+tk.E, padx=5, pady=2)
-    
+
     def reset_view(self):
         if self.solver and self.solver.phi is not None:
             self.ax.set_xlim(self.solver.x[0], self.solver.x[-1])
             self.ax.set_ylim(0, np.max(self.solver.phi) * 1.1)
             self.canvas.draw()
-    
+
     def zoom_in(self):
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
@@ -1399,7 +1399,7 @@ class DifusaoGUI_AI4PDEs:
         self.ax.set_xlim(cx - dx, cx + dx)
         self.ax.set_ylim(cy - dy, cy + dy)
         self.canvas.draw()
-    
+
     def zoom_out(self):
         xlim = self.ax.get_xlim()
         ylim = self.ax.get_ylim()
@@ -1410,39 +1410,39 @@ class DifusaoGUI_AI4PDEs:
         self.ax.set_xlim(cx - dx, cx + dx)
         self.ax.set_ylim(cy - dy, cy + dy)
         self.canvas.draw()
-    
+
     def fit_view(self):
         if self.solver and self.solver.phi is not None:
             self.ax.set_xlim(self.solver.x[0], self.solver.x[-1])
             self.ax.set_ylim(0, np.max(self.solver.phi) * 1.1)
             self.canvas.draw()
-    
+
     def criar_controles(self):
         row = 0
-        
+
         ttk.Label(self.painel_controles, text="Problema Modelo:").grid(row=row, column=0, sticky=tk.W, pady=3)
         self.problema_var = tk.StringVar()
         self.problema_combo = ttk.Combobox(self.painel_controles, textvariable=self.problema_var,
                                            values=list(self.problemas.keys()), width=18)
         self.problema_combo.grid(row=row, column=1, pady=3, padx=3)
-        self.problema_combo.bind('<<ComboboxSelected>>', 
+        self.problema_combo.bind('<<ComboboxSelected>>',
                                  lambda e: self.carregar_problema(self.problema_var.get()))
-        ttk.Button(self.painel_controles, text="Carregar", 
+        ttk.Button(self.painel_controles, text="Carregar",
                   command=lambda: self.carregar_problema(self.problema_var.get())).grid(row=row, column=2, pady=3, padx=3)
         row += 1
-        
+
         ttk.Separator(self.painel_controles, orient='horizontal').grid(row=row, column=0, columnspan=3, sticky=tk.W+tk.E, pady=5)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Domínio:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=3)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="L [cm]:").grid(row=row, column=0, sticky=tk.W)
         self.L_entry = ttk.Entry(self.painel_controles, width=10)
         self.L_entry.grid(row=row, column=1, padx=3)
         self.L_entry.insert(0, "26.0")
         self.L_entry.bind('<KeyRelease>', self.atualizar_materiais_por_L)
-        
+
         ttk.Label(self.painel_controles, text="N:").grid(row=row, column=2, sticky=tk.W)
         self.N_entry = ttk.Entry(self.painel_controles, width=8)
         self.N_entry.grid(row=row, column=3, padx=3)
@@ -1457,74 +1457,74 @@ class DifusaoGUI_AI4PDEs:
         )
         self.discretizacao_combo.grid(row=row, column=1, columnspan=3, sticky=tk.W, padx=3)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Condições:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=3)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Esquerda:").grid(row=row, column=0, sticky=tk.W)
         self.esquerda_var = tk.StringVar(value="reflexiva")
         self.esquerda_combo = ttk.Combobox(self.painel_controles, textvariable=self.esquerda_var,
                                            values=['reflexiva', 'vácuo'], width=9)
         self.esquerda_combo.grid(row=row, column=1, padx=3)
-        
+
         ttk.Label(self.painel_controles, text="Direita:").grid(row=row, column=2, sticky=tk.W)
         self.direita_var = tk.StringVar(value="vácuo")
         self.direita_combo = ttk.Combobox(self.painel_controles, textvariable=self.direita_var,
                                           values=['reflexiva', 'vácuo'], width=9)
         self.direita_combo.grid(row=row, column=3, padx=3)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Potência [MWT]:").grid(row=row, column=0, sticky=tk.W, pady=3)
         self.potencia_entry = ttk.Entry(self.painel_controles, width=10)
         self.potencia_entry.grid(row=row, column=1, padx=3)
         self.potencia_entry.insert(0, "100.0")
-        
+
         ttk.Label(self.painel_controles, text="Pontos:").grid(row=row, column=2, sticky=tk.W, pady=3)
         self.pontos_entry = ttk.Entry(self.painel_controles, width=10)
         self.pontos_entry.grid(row=row, column=3, padx=3)
         self.pontos_entry.insert(0, "0, 50, 100, 150")
         row += 1
-        
+
         ttk.Separator(self.painel_controles, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky=tk.W+tk.E, pady=5)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Materiais:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=4, sticky=tk.W, pady=3)
         row += 1
-        
+
         self.frame_materiais = ttk.Frame(self.painel_controles)
         self.frame_materiais.grid(row=row, column=0, columnspan=4, sticky=tk.W+tk.E, pady=3)
-        
+
         self.materiais_listbox = tk.Listbox(self.frame_materiais, height=3, width=30)
         self.materiais_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(self.frame_materiais, orient=tk.VERTICAL, command=self.materiais_listbox.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.materiais_listbox.config(yscrollcommand=scrollbar.set)
         row += 1
-        
+
         frame_buttons = ttk.Frame(self.painel_controles)
         frame_buttons.grid(row=row, column=0, columnspan=4, pady=3)
         ttk.Button(frame_buttons, text="Adicionar", command=self.adicionar_material).pack(side=tk.LEFT, padx=2)
         ttk.Button(frame_buttons, text="Editar", command=self.editar_material).pack(side=tk.LEFT, padx=2)
         ttk.Button(frame_buttons, text="Remover", command=self.remover_material).pack(side=tk.LEFT, padx=2)
         row += 1
-        
+
         ttk.Separator(self.painel_controles, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky=tk.W+tk.E, pady=5)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Convergência:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=4, sticky=tk.W, pady=3)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="tol_k:").grid(row=row, column=0, sticky=tk.W)
         self.tol_k_entry = ttk.Entry(self.painel_controles, width=10)
         self.tol_k_entry.grid(row=row, column=1, padx=3)
         self.tol_k_entry.insert(0, "1e-6")
-        
+
         ttk.Label(self.painel_controles, text="tol_phi:").grid(row=row, column=2, sticky=tk.W)
         self.tol_phi_entry = ttk.Entry(self.painel_controles, width=10)
         self.tol_phi_entry.grid(row=row, column=3, padx=3)
         self.tol_phi_entry.insert(0, "1e-5")
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="max_iter:").grid(row=row, column=0, sticky=tk.W)
         self.max_iter_entry = ttk.Entry(self.painel_controles, width=10)
         self.max_iter_entry.grid(row=row, column=1, padx=3)
@@ -1552,7 +1552,7 @@ class DifusaoGUI_AI4PDEs:
         self.amortecimento_entry.grid(row=row, column=3, padx=3)
         self.amortecimento_entry.insert(0, "0.20")
         row += 1
-        
+
         ttk.Separator(self.painel_controles, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky=tk.W+tk.E, pady=5)
         row += 1
 
@@ -1591,10 +1591,10 @@ class DifusaoGUI_AI4PDEs:
 
         ttk.Separator(self.painel_controles, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky=tk.W+tk.E, pady=5)
         row += 1
-        
+
         ttk.Label(self.painel_controles, text="Ações:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=4, sticky=tk.W, pady=3)
         row += 1
-        
+
         frame_acoes = ttk.Frame(self.painel_controles)
         frame_acoes.grid(row=row, column=0, columnspan=4, pady=3)
         self.btn_executar = ttk.Button(frame_acoes, text="▶ Executar", command=self.iniciar_execucao, width=12)
@@ -1603,18 +1603,18 @@ class DifusaoGUI_AI4PDEs:
         self.btn_relatorio.pack(side=tk.LEFT, padx=2)
         self.btn_relatorio.config(state=tk.DISABLED)
         row += 1
-    
+
     def criar_barra_progresso(self):
         self.frame_progresso = ttk.LabelFrame(self.painel_controles, text="Progresso", padding=5)
         self.frame_progresso.grid(row=30, column=0, columnspan=4, sticky=tk.W+tk.E, pady=5)
-        
+
         self.progresso_var = tk.DoubleVar()
-        self.progresso_bar = ttk.Progressbar(self.frame_progresso, variable=self.progresso_var, 
+        self.progresso_bar = ttk.Progressbar(self.frame_progresso, variable=self.progresso_var,
                                             maximum=100, length=200)
         self.progresso_bar.pack(fill=tk.X, pady=2)
         self.progresso_label = ttk.Label(self.frame_progresso, text="Aguardando...")
         self.progresso_label.pack(fill=tk.X)
-    
+
     def criar_ajuda(self):
         ajuda = """
 +----------------------------------------------------------------+
@@ -1701,7 +1701,7 @@ class DifusaoGUI_AI4PDEs:
 """
         self.texto_ajuda.insert(tk.END, ajuda)
         self.texto_ajuda.config(state=tk.DISABLED)
-    
+
     def atualizar_materiais_por_L(self, event=None):
         try:
             L = float(self.L_entry.get())
@@ -1710,7 +1710,7 @@ class DifusaoGUI_AI4PDEs:
                 self.atualizar_lista_materiais()
         except ValueError:
             pass
-    
+
     def carregar_problema(self, nome):
         if nome not in self.problemas:
             return
@@ -1733,24 +1733,24 @@ class DifusaoGUI_AI4PDEs:
         self.materiais_atual = [dict(m) for m in config['materiais']]
         self.atualizar_lista_materiais()
         self.status_bar.config(text=f"Problema '{nome}' carregado")
-    
+
     def atualizar_lista_materiais(self):
         self.materiais_listbox.delete(0, tk.END)
         for i, mat in enumerate(self.materiais_atual):
             texto = f"Região {i+1}: [{mat['inicio']:.0f}, {mat['fim']:.0f}] "
             texto += f"D={mat['D']:.4f}, Σa={mat['Sigma_a']:.4f}, νΣf={mat['nuSigma_f']:.4f}"
             self.materiais_listbox.insert(tk.END, texto)
-    
+
     def adicionar_material(self):
         self.janela_material("Adicionar Material", None)
-    
+
     def editar_material(self):
         idx = self.materiais_listbox.curselection()
         if idx:
             self.janela_material("Editar Material", idx[0])
         else:
             messagebox.showwarning("Aviso", "Selecione um material para editar.")
-    
+
     def remover_material(self):
         idx = self.materiais_listbox.curselection()
         if idx:
@@ -1759,14 +1759,14 @@ class DifusaoGUI_AI4PDEs:
             self.status_bar.config(text="Material removido")
         else:
             messagebox.showwarning("Aviso", "Selecione um material para remover.")
-    
+
     def janela_material(self, titulo, idx):
         janela = tk.Toplevel(self.root)
         janela.title(titulo)
         janela.geometry("350x280")
         janela.transient(self.root)
         janela.grab_set()
-        
+
         if idx is not None:
             mat = self.materiais_atual[idx]
             inicio, fim = mat['inicio'], mat['fim']
@@ -1774,32 +1774,32 @@ class DifusaoGUI_AI4PDEs:
         else:
             inicio, fim = 0.0, 10.0
             D, Sigma_a, nuSigma_f = 1.0, 0.1, 0.1
-        
+
         ttk.Label(janela, text="Início [cm]:").grid(row=0, column=0, sticky=tk.W, pady=5, padx=10)
         inicio_entry = ttk.Entry(janela, width=15)
         inicio_entry.grid(row=0, column=1, pady=5, padx=10)
         inicio_entry.insert(0, str(inicio))
-        
+
         ttk.Label(janela, text="Fim [cm]:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=10)
         fim_entry = ttk.Entry(janela, width=15)
         fim_entry.grid(row=1, column=1, pady=5, padx=10)
         fim_entry.insert(0, str(fim))
-        
+
         ttk.Label(janela, text="D [cm]:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=10)
         D_entry = ttk.Entry(janela, width=15)
         D_entry.grid(row=2, column=1, pady=5, padx=10)
         D_entry.insert(0, str(D))
-        
+
         ttk.Label(janela, text="Σa [1/cm]:").grid(row=3, column=0, sticky=tk.W, pady=5, padx=10)
         Sigma_a_entry = ttk.Entry(janela, width=15)
         Sigma_a_entry.grid(row=3, column=1, pady=5, padx=10)
         Sigma_a_entry.insert(0, str(Sigma_a))
-        
+
         ttk.Label(janela, text="νΣf [1/cm]:").grid(row=4, column=0, sticky=tk.W, pady=5, padx=10)
         nuSigma_f_entry = ttk.Entry(janela, width=15)
         nuSigma_f_entry.grid(row=4, column=1, pady=5, padx=10)
         nuSigma_f_entry.insert(0, str(nuSigma_f))
-        
+
         def salvar():
             try:
                 novo_mat = {
@@ -1822,9 +1822,9 @@ class DifusaoGUI_AI4PDEs:
                 self.status_bar.config(text="Material salvo")
             except ValueError:
                 messagebox.showerror("Erro", "Valores inválidos. Use números.")
-        
+
         ttk.Button(janela, text="Salvar", command=salvar).grid(row=5, column=0, columnspan=2, pady=20)
-    
+
     def limpar_tabela(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1983,7 +1983,7 @@ class DifusaoGUI_AI4PDEs:
                 continue
             interfaces.append(fim)
         return sorted(set(interfaces))
-    
+
     def atualizar_progresso(self, iteracao, max_iter, k_eff, erro_k, erro_phi):
         # Tkinter deve ser atualizado pela thread principal. O solver roda em
         # thread secundária para não travar a janela; por isso usamos root.after.
@@ -2007,7 +2007,7 @@ class DifusaoGUI_AI4PDEs:
             )
         )
         self.root.update_idletasks()
-    
+
     def obter_configuracao_solver(self):
         L = float(self.L_entry.get())
         N = int(self.N_entry.get())
@@ -2066,11 +2066,11 @@ class DifusaoGUI_AI4PDEs:
     def iniciar_execucao(self):
         if self.executando:
             return
-        
+
         try:
             config = self.obter_configuracao_solver()
             metodo_selecionado = self.metodo_fonte_var.get()
-            
+
             self.resultados_tabela = []
             self.resultados_comparacao = []
             self.solver_thomas = None
@@ -2082,7 +2082,7 @@ class DifusaoGUI_AI4PDEs:
             self.progresso_label.config(text="Iniciando...")
             self.frame_progresso.config(text="Progresso 0.0% | tempo = 00:00:00")
             self.tempo_inicio_execucao = time.perf_counter()
-            
+
             metodo_principal = "unet_multigrid"
             config_principal = dict(config)
             config_principal["metodo_fonte"] = metodo_principal
@@ -2092,9 +2092,9 @@ class DifusaoGUI_AI4PDEs:
                 text=f"Dispositivo em uso: {self.solver.nome_dispositivo}"
             )
             self.metodo_label.config(text=f"Método: {self.solver.metodo_executado}")
-            
+
             self.status_bar.config(text="Executando solver...")
-            
+
             def executar():
                 try:
                     k_eff, phi = self.solver.resolver(metodo_fonte=metodo_principal)
@@ -2116,28 +2116,28 @@ class DifusaoGUI_AI4PDEs:
                     self.root.after(0, self.finalizar_execucao, k_eff, phi, None)
                 except Exception as e:
                     self.root.after(0, self.finalizar_execucao, None, None, str(e))
-            
+
             thread = threading.Thread(target=executar)
             thread.daemon = True
             thread.start()
-            
+
         except Exception as e:
             self.executando = False
             self.btn_executar.config(state=tk.NORMAL)
             self.btn_gerar_tabela.config(state=tk.NORMAL)
             messagebox.showerror("Erro", f"Erro na configuração:\n{str(e)}")
             self.status_bar.config(text="Erro na configuração")
-    
+
     def finalizar_execucao(self, k_eff, phi, erro):
         self.executando = False
         self.btn_executar.config(state=tk.NORMAL)
         self.btn_gerar_tabela.config(state=tk.NORMAL)
-        
+
         if erro:
             messagebox.showerror("Erro", f"Erro na execução:\n{erro}")
             self.status_bar.config(text="Erro na execução")
             return
-        
+
         self.btn_relatorio.config(state=tk.NORMAL)
         self.atualizar_grafico()
         self.atualizar_resultados()
@@ -2159,7 +2159,7 @@ class DifusaoGUI_AI4PDEs:
         if self.executando:
             messagebox.showwarning("Aviso", "Aguarde a execução atual terminar.")
             return
-        
+
         if not self.materiais_atual:
             messagebox.showwarning("Aviso", "Defina pelo menos um material.")
             return
@@ -2199,7 +2199,7 @@ class DifusaoGUI_AI4PDEs:
         except Exception as e:
             messagebox.showerror("Erro", f"Erro na configuração da tabela:\n{str(e)}")
             return
-        
+
         self.configurar_colunas_tabela()
         self.limpar_tabela()
         self.executando = True
@@ -2207,14 +2207,14 @@ class DifusaoGUI_AI4PDEs:
         self.btn_gerar_tabela.config(state=tk.DISABLED)
         self.tabela_status.config(text="Gerando tabela...")
         self.status_bar.config(text="Gerando tabela variando N...")
-        
+
         def gerar():
             try:
                 self.resultados_tabela = []
-                
+
                 for N in N_list:
                     self.root.after(0, lambda n=N: self.tabela_status.config(text=f"Processando N={n}..."))
-                    
+
                     solver = SolverDifusaoAI4PDEs(
                         L=L, N=N, materiais=materiais,
                         cond_esquerda=esquerda, cond_direita=direita,
@@ -2231,7 +2231,7 @@ class DifusaoGUI_AI4PDEs:
                     k_eff, phi = solver.resolver(metodo_fonte=metodo_tabela)
                     fluxos_pontos = self.calcular_fluxos_pontos_tabela(solver, pontos)
                     fluxos_ref_analitico = self.calcular_fluxos_referencia_analitica(solver, pontos)
-                    
+
                     resultado = {
                         'N': N,
                         'discretizacao': solver.discretizacao.upper(),
@@ -2249,7 +2249,7 @@ class DifusaoGUI_AI4PDEs:
                         'tempo_total': solver.tempo_total
                     }
                     self.resultados_tabela.append(resultado)
-                
+
                 self.calcular_erros_fluxo_tabela(self.resultados_tabela, pontos)
                 self.salvar_csv("resultados_refinamento.csv", self.resultados_tabela)
                 self.root.after(0, lambda: self.preencher_tabela_resultados(list(pontos)))
@@ -2263,13 +2263,13 @@ class DifusaoGUI_AI4PDEs:
                     )
                 )
                 self.root.after(0, lambda: self.status_bar.config(text="Tabela concluída."))
-                
+
             except Exception as e:
                 self.root.after(0, lambda err=str(e): messagebox.showerror("Erro", f"Erro ao gerar tabela:\n{err}"))
                 self.root.after(0, lambda: self.tabela_status.config(text="Erro na geração."))
             finally:
                 self.root.after(0, self.finalizar_tabela)
-        
+
         thread = threading.Thread(target=gerar)
         thread.daemon = True
         thread.start()
@@ -2278,7 +2278,7 @@ class DifusaoGUI_AI4PDEs:
         self.executando = False
         self.btn_executar.config(state=tk.NORMAL)
         self.btn_gerar_tabela.config(state=tk.NORMAL)
-    
+
     def preencher_tabela_resultados(self, pontos):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -2289,12 +2289,12 @@ class DifusaoGUI_AI4PDEs:
     def atualizar_grafico(self):
         if self.solver is None or self.solver.phi is None:
             return
-        
+
         self.ax.clear()
         modo = self.modo_grafico.get()
         x = self.solver.x
         phi = self.solver.phi_normalizado if self.solver.phi_normalizado is not None else self.solver.phi
-        
+
         if modo == "fluxo":
             self.ax.plot(x, phi, 'b-', linewidth=2, label='U-Net/multigrid 1D')
             if self.solver_thomas is not None and self.solver_thomas.phi is not None:
@@ -2326,7 +2326,7 @@ class DifusaoGUI_AI4PDEs:
             self.ax.set_title('Distribuição do Fluxo')
             self.ax.grid(True, alpha=0.3)
             self.ax.legend()
-        
+
         elif modo == "convergencia":
             self.ax.plot(self.solver.historico_k, 'b-', linewidth=2)
             self.ax.set_xlabel('Iteração')
@@ -2368,7 +2368,7 @@ class DifusaoGUI_AI4PDEs:
             else:
                 self.ax.text(0.5, 0.5, 'Execute a comparação entre métodos',
                              transform=self.ax.transAxes, ha='center', va='center')
-        
+
         elif modo == "comparacao":
             self.ax.plot(x, phi, 'b-', linewidth=2, label='U-Net/multigrid 1D')
             if self.solver_thomas is not None and self.solver_thomas.phi is not None:
@@ -2394,7 +2394,7 @@ class DifusaoGUI_AI4PDEs:
             self.ax.set_ylabel('Fluxo φ(x)')
             self.ax.grid(True, alpha=0.3)
             self.ax.legend()
-        
+
         elif modo == "todos":
             self.ax.plot(x, self.solver.D_arr, 'r-', label='D', linewidth=2)
             self.ax.plot(x, self.solver.Sigma_a_arr, 'g-', label='Σa', linewidth=2)
@@ -2408,15 +2408,15 @@ class DifusaoGUI_AI4PDEs:
             self.ax.set_title('Parâmetros Materiais e Interfaces')
             self.ax.grid(True, alpha=0.3)
             self.ax.legend()
-        
+
         self.ax.set_title(self.ax.get_title() + ' / ' + self.solver.discretizacao.upper())
         self.fig.tight_layout(pad=3.0)
         self.canvas.draw()
-    
+
     def atualizar_resultados(self):
         if self.solver is None:
             return
-        
+
         texto = f"Discretização: {self.solver.discretizacao.upper()} | N={self.solver.N} intervalos/elementos, {self.solver.N+1} nós\n"
         texto += f"k_eff = {self.solver.k_eff:.8f}\n"
         if self.solver.k_ref:
@@ -2433,7 +2433,7 @@ class DifusaoGUI_AI4PDEs:
             texto += f"Último resíduo fonte fixa: {self.solver.residuos_fonte_fixa[-1]:.3e}\n"
             texto += f"Últimas 10 iterações fonte fixa: {self.solver.iteracoes_fonte_fixa[-10:]}\n"
         texto += f"Método: {self.solver.metodo_executado}\n"
-        
+
         self.texto_resultados.delete(1.0, tk.END)
         self.texto_resultados.insert(tk.END, texto)
 

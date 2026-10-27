@@ -35,7 +35,7 @@ def standalone_source(path):
                  and isinstance(node.test.left, ast.Name) and node.test.left.id == '__name__')
         if relative_import or entry:
             removed.update(range(node.lineno-1, node.end_lineno))
-    return ''.join(line for i, line in enumerate(lines) if i not in removed).strip()
+    return '\n'.join(line.rstrip() for i, line in enumerate(lines) if i not in removed).strip()
 
 
 def main():
