@@ -31,6 +31,7 @@ def test_tkinter_mef_parametros_e_tabela(tmp_path, monkeypatch):
         app = DifusaoGUI_AI4PDEs(root)
         app.discretizacao_var.set('MEF')
         assert app.obter_configuracao_solver()['discretizacao'] == 'mef'
+        assert app.obter_configuracao_solver()['precisao'] == 'float64'
         app.carregar_problema('Heterogêneo (Couto, 2003)')
         assert app.obter_lista_N_tabela() == [3,12,48,96,192,300,384]
         assert app.pontos_entry.get() == '0.0, 50.0, 100.0, 150.0'
@@ -50,6 +51,7 @@ def test_tkinter_mef_parametros_e_tabela(tmp_path, monkeypatch):
         assert not errors
         assert len(app.tree.get_children()) == 6  # Uma linha por par (N,x).
         assert all(r['discretizacao'] == 'MEF' for r in app.resultados_tabela)
+        assert all(r['precisao'] == 'float64' for r in app.resultados_tabela)
         assert all(r['erro_fluxo_pontos'][26.] is None for r in app.resultados_tabela)
         coarse = app.resultados_tabela[0]
         assert coarse['fluxos_pontos'][13.] == pytest.approx(coarse['fluxos_pontos'][0.]/2)

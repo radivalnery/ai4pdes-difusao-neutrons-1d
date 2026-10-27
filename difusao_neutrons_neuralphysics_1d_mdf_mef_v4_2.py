@@ -4,6 +4,7 @@ Arquivo unico gerado de src/neutron_ai4pdes; usa as MESMAS funcoes dos modulos.
 GUI: python difusao_neutrons_neuralphysics_1d_mdf_mef_v4_2.py
 Experimento: acrescente --experimento-artigo --discretizacao mef
 MDF e MEF escolhem a discretizacao; U-Net/multigrid e o resolvedor principal.
+Mesmo banco Conv1d, precisao, transferencias e ciclo V para MDF e MEF.
 Thomas e referencia opcional e nao participa de nenhum nivel do multigrid.
 As versoes antigas e o backup continuam disponiveis separadamente.
 """
@@ -105,14 +106,152 @@ def erro_forma_fluxo(phi_calc, phi_ref):
 
 
 # ============================================================================
-# 4. OPERADOR MDF E CICLO MULTIGRID
+# 4. CONVOLUCOES E TRANSFERENCIAS COMUNS MDF/MEF
 # ============================================================================
 
-"""Operadores MDF e ciclo U-Net/multigrid sem treinamento, base v4.1."""
+"""Caminho convolucional comum aos stencils MDF e MEF, sem treinamento.
+
+As linhas de A e F sao representadas por tres coeficientes locais. Uma unica
+Conv1d fixa extrai (phi[i-1], phi[i], phi[i+1]); os coeficientes fisicos pesam
+esses canais. No heterogeneo eles variam no espaco: nao se pressupoe um unico
+kernel fisico global. Tanto absorcao/difusao quanto fissao usam este caminho.
+
+H e a medida nodal positiva (meia soma dos comprimentos adjacentes). Trabalhamos
+com residuos por unidade de comprimento. Para MEF, A=H^-1(K+Ma), F=H^-1 Mf;
+isso e apenas escalonamento de linhas, NAO diagonalizacao da massa consistente.
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+
+def medidas_nodais(x):
+    x = np.asarray(x, dtype=float)
+    if x.ndim != 1 or len(x) < 2 or not np.all(np.isfinite(x)) or np.any(np.diff(x) <= 0):
+        raise ValueError('A malha requer pelo menos dois nos finitos e crescentes.')
+    dx = np.diff(x)
+    return np.r_[dx[0]/2, (dx[:-1]+dx[1:])/2, dx[-1]/2]
+
+
+class OperadorStencil1D(nn.Module):
+    """Aplicacao comum das tres diagonais, contornos e conversao para Thomas."""
+
+    def __init__(self, x, cond_esquerda, cond_direita, dtype=torch.float64):
+        super().__init__()
+        if dtype not in (torch.float32, torch.float64):
+            raise ValueError('Precisao deve ser float32 ou float64.')
+        if any(c not in ('reflexiva', 'vácuo') for c in (cond_esquerda, cond_direita)):
+            raise ValueError('Contorno deve ser reflexiva ou vacuo (fluxo nulo).')
+        self.x_numpy = np.asarray(x, dtype=float).copy()
+        self.cond_esquerda, self.cond_direita = cond_esquerda, cond_direita
+        self.register_buffer('x', torch.tensor(self.x_numpy, dtype=dtype))
+        self.register_buffer('medida', torch.tensor(medidas_nodais(x), dtype=dtype))
+        self.convolucao = nn.Conv1d(1, 3, 3, padding=1, bias=False, dtype=dtype)
+        with torch.no_grad():
+            self.convolucao.weight.copy_(torch.eye(3, dtype=dtype).reshape(3, 1, 3))
+        self.convolucao.requires_grad_(False)
+
+    def definir_stencils(self, lower, diag, upper, flower, fdiag, fupper):
+        # As bandas externas nao existem; padding nulo fecha o banco de filtros.
+        a = np.column_stack((np.r_[0., lower], diag, np.r_[upper, 0.]))
+        f = np.column_stack((np.r_[0., flower], fdiag, np.r_[fupper, 0.]))
+        for i, cond in ((0, self.cond_esquerda), (-1, self.cond_direita)):
+            if cond == 'vácuo':
+                a[i, :] = (0., 1., 0.)
+                if i == 0:
+                    a[1, 0] = 0.
+                else:
+                    a[-2, 2] = 0.
+        if not np.all(np.isfinite(a)) or np.any(a[:, 1] <= 0):
+            raise ValueError('Stencil A invalido ou diagonal nao positiva.')
+        if not np.all(np.isfinite(f)) or np.any(f < 0):
+            raise ValueError('Stencil de fissao invalido.')
+        self.register_buffer('a_coef', torch.tensor(a, dtype=self.x.dtype))
+        self.register_buffer('f_coef', torch.tensor(f, dtype=self.x.dtype))
+        # Integral da producao: 1^T H F phi, sem copiar dados da GPU por iteracao.
+        H = self.medida.double().numpy()
+        f = self.f_coef.double().numpy()
+        self.pesos_producao_numpy = H*f[:, 1]
+        self.pesos_producao_numpy[:-1] += H[1:]*f[1:, 0]
+        self.pesos_producao_numpy[1:] += H[:-1]*f[:-1, 2]
+
+    def _aplicar_stencil(self, phi, coef):
+        phi = phi.reshape(-1).to(device=coef.device, dtype=coef.dtype)
+        vizinhos = self.convolucao(phi.reshape(1, 1, -1)).squeeze(0).transpose(0, 1)
+        return torch.sum(coef * vizinhos, dim=1)
+
+    def forward(self, phi):
+        return self._aplicar_stencil(phi, self.a_coef)
+
+    def aplicar_fissao(self, phi):
+        return self._aplicar_stencil(phi, self.f_coef)
+
+    def aplicar_fissao_numpy(self, phi):
+        """Auxiliar de inspecao; a resolucao principal usa aplicar_fissao/Conv1d."""
+        with torch.no_grad():
+            t = torch.as_tensor(phi, device=self.x.device, dtype=self.x.dtype)
+            return self.aplicar_fissao(t).cpu().numpy()
+
+    def diagonal(self):
+        return self.a_coef[:, 1]
+
+    def aplicar_contorno_fluxo(self, phi):
+        phi = phi.clone()
+        if self.cond_esquerda == 'vácuo':
+            phi[0] = 0.
+        if self.cond_direita == 'vácuo':
+            phi[-1] = 0.
+        return phi
+
+    def matriz_tridiagonal_numpy(self, rhs=None):
+        a = self.a_coef.detach().cpu().numpy()
+        rhs = np.zeros(len(a)) if rhs is None else np.asarray(rhs, dtype=float).copy()
+        if self.cond_esquerda == 'vácuo':
+            rhs[0] = 0.
+        if self.cond_direita == 'vácuo':
+            rhs[-1] = 0.
+        return a[1:, 0].copy(), a[:, 1].copy(), a[:-1, 2].copy(), rhs
+
+
+class TransferenciaNodal1D(nn.Module):
+    """P linear e R=Hc^-1 P^T Hf, iguais para MDF e MEF escalonados.
+
+    Em malhas uniformes 2:1, R coincide com full weighting no interior.
+    Para residuos MEF integrados a mesma expressao equivale exatamente a P^T.
+    As coordenadas reais evitam encurtar o dominio quando N e impar.
+    """
+
+    def __init__(self, fino, grosso):
+        super().__init__()
+        right = torch.searchsorted(grosso, fino).clamp(1, grosso.numel()-1)
+        left = right-1
+        weight = (fino-grosso[left])/(grosso[right]-grosso[left])
+        self.n_grosso = grosso.numel()
+        for name, value in [('left', left), ('right', right), ('weight', weight),
+                            ('hf', torch.as_tensor(medidas_nodais(fino.cpu().numpy()), dtype=fino.dtype, device=fino.device)),
+                            ('hc', torch.as_tensor(medidas_nodais(grosso.cpu().numpy()), dtype=grosso.dtype, device=grosso.device))]:
+            self.register_buffer(name, value)
+
+    def prolongar(self, phi):
+        return (1-self.weight)*phi[self.left] + self.weight*phi[self.right]
+
+    def restringir(self, residual):
+        result = residual.new_zeros(self.n_grosso)
+        weighted = self.hf*residual
+        result.index_add_(0, self.left, (1-self.weight)*weighted)
+        result.index_add_(0, self.right, self.weight*weighted)
+        return result/self.hc
+
+
+# ============================================================================
+# 5. OPERADOR MDF E CICLO MULTIGRID UNICO
+# ============================================================================
+
+"""Stencils MDF e ciclo V/U-Net UNICO para MDF/MEF, sem treinamento."""
+import numpy as np
+import torch
+import torch.nn as nn
 from dataclasses import dataclass
 
 @dataclass
@@ -162,143 +301,54 @@ def resolver_tridiagonal_thomas(lower, diag, upper, rhs):
     return x
 
 
-class OperadorDifusao1D(nn.Module):
-    """
-    Operador A = -d/dx(D dphi/dx) + Sigma_a phi em forma Neural Physics.
+class OperadorDifusao1D(OperadorStencil1D):
+    """MDF conservativo: mesmas bandas da v4.1 na malha fina uniforme.
 
-    Para meio homogêneo, o stencil interno é aplicado como uma Conv1d fixa:
-
-        [-D/h², 2D/h² + Sigma_a, -D/h²].
-
-    Para meio heterogêneo, o operador é aplicado na forma conservativa usando
-    D_{i+1/2}. A estrutura continua sendo local, stencilada e sem treinamento.
+    Nos niveis grossos nao uniformes, fluxos entre nos sao divididos por H_i.
+    A media harmonica de D nas faces e preservada. A fonte MDF e diagonal.
+    O banco Conv1d e compartilhado com MEF, inclusive para a fissao.
     """
 
-    def __init__(self, D_arr, Sigma_a_arr, h, cond_esquerda='reflexiva', cond_direita='vácuo'):
-        super().__init__()
+    def __init__(self, D_arr, Sigma_a_arr, h, cond_esquerda='reflexiva',
+                 cond_direita='vácuo', *, x=None, materiais=None,
+                 nuSigma_f_arr=None, dtype=torch.float64):
+        D = np.asarray(D_arr, dtype=float)
+        Sa = np.asarray(Sigma_a_arr, dtype=float)
+        x = np.arange(len(D))*h if x is None else np.asarray(x, dtype=float)
+        super().__init__(x, cond_esquerda, cond_direita, dtype)
+        if len(D) != len(x) or Sa.shape != D.shape or np.any(D <= 0) or np.any(Sa < 0):
+            raise ValueError('Coeficientes MDF invalidos.')
         self.h = float(h)
-        self.cond_esquerda = cond_esquerda
-        self.cond_direita = cond_direita
+        self.materiais = tuple(dict(m) for m in (materiais or ()))
+        nf = np.zeros_like(D) if nuSigma_f_arr is None else np.asarray(nuSigma_f_arr, dtype=float)
+        if nf.shape != D.shape or np.any(nf < 0):
+            raise ValueError('Fissao MDF invalida.')
+        face = 2*D[:-1]*D[1:]/(D[:-1]+D[1:])
+        H = medidas_nodais(x)
+        conductance = face/np.diff(x)
+        lower, upper = -conductance/H[1:], -conductance/H[:-1]
+        diag = Sa.copy()
+        diag[1:] -= lower
+        diag[:-1] -= upper
+        for name, value in [('D', D), ('Sigma_a', Sa), ('D_half', face), ('nuSigma_f', nf)]:
+            self.register_buffer(name, torch.tensor(value, dtype=dtype))
+        self.definir_stencils(lower, diag, upper, np.zeros_like(lower), nf, np.zeros_like(upper))
 
-        D_np = np.asarray(D_arr, dtype=np.float32)
-        Sigma_np = np.asarray(Sigma_a_arr, dtype=np.float32)
-        self.register_buffer("D", torch.tensor(D_np, dtype=torch.float32))
-        self.register_buffer("Sigma_a", torch.tensor(Sigma_np, dtype=torch.float32))
-
-        D_left = D_np[:-1]
-        D_right = D_np[1:]
-        D_half = np.zeros_like(D_left, dtype=np.float32)
-        mask = (D_left + D_right) > 0.0
-        D_half[mask] = 2.0 * D_left[mask] * D_right[mask] / (D_left[mask] + D_right[mask])
-        self.register_buffer("D_half", torch.tensor(D_half, dtype=torch.float32))
-
-        self.homogeneo = bool(np.allclose(D_np, D_np[0]) and np.allclose(Sigma_np, Sigma_np[0]))
-
-        h2 = self.h * self.h
-        k_esq = -float(D_np[0]) / h2
-        k_centro = (2.0 * float(D_np[0]) / h2) + float(Sigma_np[0])
-        k_dir = -float(D_np[0]) / h2
-        kernel = torch.tensor([[[k_esq, k_centro, k_dir]]], dtype=torch.float32)
-
-        self.conv_A_homogeneo = nn.Conv1d(1, 1, kernel_size=3, padding=1, padding_mode='replicate', bias=False)
-        with torch.no_grad():
-            self.conv_A_homogeneo.weight.data = kernel
-        for param in self.conv_A_homogeneo.parameters():
-            param.requires_grad = False
-
-    def _vetor(self, phi):
-        if phi.ndim == 3:
-            return phi.view(-1)
-        return phi
-
-    def aplicar_contorno_fluxo(self, phi):
-        phi = phi.clone()
-        # Condicoes de Dirichlet sao impostas diretamente. A condicao
-        # reflexiva ja esta representada na linha de fronteira do operador A,
-        # portanto nao se deve sobrescrever phi[0] = phi[1] a cada suavizacao.
-        if self.cond_esquerda == 'vácuo':
-            phi[0] = 0.0
-
-        if self.cond_direita == 'vácuo':
-            phi[-1] = 0.0
-        return phi
-
-    def diagonal(self):
-        n = self.D.numel()
-        h2 = self.h * self.h
-        diag = torch.zeros(n, device=self.D.device, dtype=torch.float32)
-        diag[1:-1] = (self.D_half[:-1] + self.D_half[1:]) / h2 + self.Sigma_a[1:-1]
-
-        if self.cond_esquerda == 'vácuo':
-            diag[0] = 1.0
+    def criar_nivel_grosso(self, x):
+        if self.materiais:
+            values = []
+            for point in x:
+                matches = [m for m in self.materiais if m['inicio'] <= point <= m['fim']]
+                if not matches:
+                    raise ValueError('Material MDF ausente na malha grossa.')
+                values.append([matches[0][k] for k in ('D', 'Sigma_a', 'nuSigma_f')])
+            D, Sa, nf = np.asarray(values).T
         else:
-            diag[0] = 2.0 * self.D[0] / h2 + self.Sigma_a[0]
-
-        if self.cond_direita == 'vácuo':
-            diag[-1] = 1.0
-        else:
-            diag[-1] = 2.0 * self.D[-1] / h2 + self.Sigma_a[-1]
-        return torch.clamp(diag, min=1.0e-20)
-
-    def matriz_tridiagonal_numpy(self, rhs=None):
-        """Monta lower, diag, upper e rhs pela mesma discretização do operador."""
-        D = self.D.detach().cpu().numpy().astype(float)
-        Sigma_a = self.Sigma_a.detach().cpu().numpy().astype(float)
-        D_half = self.D_half.detach().cpu().numpy().astype(float)
-        n = D.size
-        h2 = self.h * self.h
-
-        lower = np.zeros(n - 1, dtype=float)
-        diag = np.zeros(n, dtype=float)
-        upper = np.zeros(n - 1, dtype=float)
-        rhs_np = np.zeros(n, dtype=float) if rhs is None else np.asarray(rhs, dtype=float).copy()
-
-        for i in range(1, n - 1):
-            lower[i - 1] = -D_half[i - 1] / h2
-            diag[i] = (D_half[i - 1] + D_half[i]) / h2 + Sigma_a[i]
-            upper[i] = -D_half[i] / h2
-
-        if self.cond_esquerda == 'vácuo':
-            diag[0] = 1.0
-            upper[0] = 0.0
-            rhs_np[0] = 0.0
-        elif self.cond_esquerda == 'reflexiva':
-            diag[0] = 2.0 * D[0] / h2 + Sigma_a[0]
-            upper[0] = -2.0 * D[0] / h2
-
-        if self.cond_direita == 'vácuo':
-            diag[-1] = 1.0
-            lower[-1] = 0.0
-            rhs_np[-1] = 0.0
-        elif self.cond_direita == 'reflexiva':
-            lower[-1] = -2.0 * D[-1] / h2
-            diag[-1] = 2.0 * D[-1] / h2 + Sigma_a[-1]
-
-        return lower, diag, upper, rhs_np
-
-    def forward(self, phi):
-        phi = self._vetor(phi).to(self.D.device).float()
-        h2 = self.h * self.h
-
-        if self.homogeneo:
-            out = self.conv_A_homogeneo(phi.view(1, 1, -1)).view(-1)
-        else:
-            out = torch.zeros_like(phi)
-            grad = (phi[1:] - phi[:-1]) / self.h
-            corrente = self.D_half * grad
-            out[1:-1] = -(corrente[1:] - corrente[:-1]) / self.h + self.Sigma_a[1:-1] * phi[1:-1]
-
-        if self.cond_esquerda == 'vácuo':
-            out[0] = phi[0]
-        elif self.cond_esquerda == 'reflexiva':
-            out[0] = (2.0 * self.D[0] / h2 + self.Sigma_a[0]) * phi[0] - (2.0 * self.D[0] / h2) * phi[1]
-
-        if self.cond_direita == 'vácuo':
-            out[-1] = phi[-1]
-        elif self.cond_direita == 'reflexiva':
-            out[-1] = -(2.0 * self.D[-1] / h2) * phi[-2] + (2.0 * self.D[-1] / h2 + self.Sigma_a[-1]) * phi[-1]
-
-        return out
+            D, Sa, nf = [np.interp(x, self.x_numpy, t.detach().cpu().numpy())
+                         for t in (self.D, self.Sigma_a, self.nuSigma_f)]
+        return OperadorDifusao1D(D, Sa, np.diff(x)[0], self.cond_esquerda,
+                                 self.cond_direita, x=x, materiais=self.materiais,
+                                 nuSigma_f_arr=nf, dtype=self.x.dtype)
 
 
 class SolverFonteFixaUNet1D(nn.Module):
@@ -308,7 +358,7 @@ class SolverFonteFixaUNet1D(nn.Module):
     Não há treinamento. As operações são:
     - aplicação do operador A por stencil/convolução fixa;
     - suavização por Jacobi ponderado;
-    - restrição full-weighting para malhas grossas;
+    - restricao ponderada R=Hc^-1 P^T Hf para malhas grossas;
     - prolongamento por interpolação linear;
     - operadores rediscretizados em todos os níveis;
     - solução no nível mais grosso e correção nos níveis finos.
@@ -331,37 +381,25 @@ class SolverFonteFixaUNet1D(nn.Module):
         self.operadores = nn.ModuleList([operador_A])
         self._construir_hierarquia()
 
-    def _coarsen_array(self, values):
-        """Coarsening nodal por full weighting, preservando as fronteiras."""
-        if values.numel() <= self.min_pontos_grosso:
-            return values
-        coarse_n = (values.numel() - 1) // 2 + 1
-        coarse = torch.empty(coarse_n, device=values.device, dtype=values.dtype)
-        coarse[0] = values[0]
-        coarse[-1] = values[-1]
-        for j in range(1, coarse_n - 1):
-            i = 2 * j
-            coarse[j] = 0.25 * values[i - 1] + 0.50 * values[i] + 0.25 * values[i + 1]
-        return coarse
-
     def _construir_hierarquia(self):
-        """Cria operadores A_h, A_2h, A_4h, ... por rediscretização geométrica."""
+        """Mesmas malhas aninhadas para as duas formulacoes; so A/F diferem."""
+        self.transferencias = nn.ModuleList()
         atual = self.operador_A
         for _ in range(1, self.max_niveis):
-            n_fino = atual.D.numel()
-            if n_fino <= self.min_pontos_grosso or n_fino < 2 * self.min_pontos_grosso - 1:
+            x = atual.x_numpy
+            if len(x) < 2*self.min_pontos_grosso-1:
                 break
-            D_c = self._coarsen_array(atual.D).detach().cpu().numpy()
-            Sigma_c = self._coarsen_array(atual.Sigma_a).detach().cpu().numpy()
-            op_c = OperadorDifusao1D(
-                D_c,
-                Sigma_c,
-                atual.h * 2.0,
-                atual.cond_esquerda,
-                atual.cond_direita,
-            ).to(atual.D.device)
-            self.operadores.append(op_c)
-            atual = op_c
+            selected = set(range(0, len(x), 2)) | {len(x)-1}
+            for mat in atual.materiais:
+                for key in ('inicio', 'fim'):
+                    selected.update(np.flatnonzero(np.isclose(x, mat[key], atol=1e-12, rtol=0)).tolist())
+            indices = sorted(selected)
+            if len(indices) >= len(x):
+                break
+            coarse = atual.criar_nivel_grosso(x[indices]).to(atual.x.device)
+            self.transferencias.append(TransferenciaNodal1D(atual.x, coarse.x))
+            self.operadores.append(coarse)
+            atual = coarse
 
     def _corrigir_contorno_rhs(self, rhs):
         rhs = rhs.clone()
@@ -381,22 +419,16 @@ class SolverFonteFixaUNet1D(nn.Module):
         return phi
 
     def _restringir(self, fine, nivel=0):
-        """Restrição full-weighting: I_h^2h r_h."""
-        return self._coarsen_array(fine)
+        residual = self.transferencias[nivel].restringir(fine)
+        return self.operadores[nivel+1].aplicar_contorno_fluxo(residual)
 
     def _prolongar(self, coarse, tamanho_fino, nivel=0):
-        """Prolongamento linear: I_2h^h e_2h."""
-        return F.interpolate(
-            coarse.view(1, 1, -1),
-            size=tamanho_fino,
-            mode='linear',
-            align_corners=True,
-        ).view(-1)
+        return self.transferencias[nivel].prolongar(coarse)
 
     def _resolver_grosso(self, operador, rhs, chute=None):
         """Resolve o nível mais grosso por Jacobi, sem solver direto clássico."""
         diag = operador.diagonal()
-        phi = torch.zeros_like(rhs)
+        phi = torch.zeros_like(rhs) if chute is None else chute.clone()
         phi = operador.aplicar_contorno_fluxo(phi)
         return self._suavizar_jacobi(operador, phi, rhs, diag, self.suavizacoes_grosso)
 
@@ -427,9 +459,8 @@ class SolverFonteFixaUNet1D(nn.Module):
             phi = chute.clone().to(dtype=dtype)
         phi = self.operador_A.aplicar_contorno_fluxo(phi)
 
-        diag = self.operador_A.diagonal()
         norma_rhs = max(float(torch.linalg.vector_norm(rhs, ord=float('inf')).item()),
-                        getattr(self, 'norma_rhs_minima', 1.0))
+                        torch.finfo(dtype).tiny)
         ultimo_residuo = float('inf')
         historico_residuo = []
 
@@ -445,7 +476,7 @@ class SolverFonteFixaUNet1D(nn.Module):
 
 
 # ============================================================================
-# 5. FORMULACAO MEF P1 E TRANSFERENCIAS
+# 6. FORMULACAO MEF P1 COM MASSA CONSISTENTE
 # ============================================================================
 
 """MEF/Galerkin P1 para difusao de neutrons em uma dimensao.
@@ -455,17 +486,17 @@ class SolverFonteFixaUNet1D(nn.Module):
 3. Os coeficientes sao integrados por material, inclusive quando uma interface
    corta um elemento. N continua sendo o numero de elementos, com N+1 nos.
 4. As tres diagonais sao buffers PyTorch fixos: nao ha pesos treinaveis.
-5. O ciclo multigrid aplica Jacobi, restricao adjunta e interpolacao linear.
+5. A e F sao escalonados por H^-1 e usam o MESMO banco Conv1d e ciclo do MDF.
+   A massa de absorcao e fissao continua consistente, sem lumping.
    Thomas e usado somente pelo caminho externo de referencia do solver.
 """
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 
 
-class OperadorMEF1D(nn.Module):
+class OperadorMEF1D(OperadorStencil1D):
     """A = K + M_a e F = M_f, com contornos homogeneos.
 
     Em um elemento de comprimento h e material constante:
@@ -476,11 +507,11 @@ class OperadorMEF1D(nn.Module):
     corrente nula (reflexiva) e uma condicao natural da forma fraca.
     """
 
-    def __init__(self, x, materiais, cond_esquerda='reflexiva', cond_direita='vácuo'):
-        super().__init__()
+    def __init__(self, x, materiais, cond_esquerda='reflexiva', cond_direita='vácuo', *, dtype=torch.float64):
         x = np.asarray(x, dtype=float)
         if x.ndim != 1 or len(x) < 2 or not np.all(np.diff(x) > 0):
             raise ValueError('A malha MEF deve conter pelo menos dois nos crescentes.')
+        super().__init__(x, cond_esquerda, cond_direita, dtype)
         self.cond_esquerda = cond_esquerda
         self.cond_direita = cond_direita
         self.materiais = tuple(dict(m) for m in materiais)
@@ -525,128 +556,25 @@ class OperadorMEF1D(nn.Module):
             diag[-1], off[-1] = 1., 0.
         if np.any(diag <= 0):
             raise ValueError('Diagonal MEF nao positiva; verifique materiais e contornos.')
-        for name, value in [('x', x), ('a_diag', diag), ('a_off', off),
+        # Matrizes integradas permanecem disponiveis para auditoria independente.
+        for name, value in [('a_diag', diag), ('a_off', off),
                             ('f_diag', fdiag), ('f_off', foff)]:
-            self.register_buffer(name, torch.tensor(value, dtype=torch.float64))
-        self._fdiag_numpy = fdiag.copy()
-        self._foff_numpy = foff.copy()
+            self.register_buffer(name, torch.tensor(value, dtype=dtype))
+        H = medidas_nodais(x)
+        self.definir_stencils(off/H[1:], diag/H, off/H[:-1],
+                             foff/H[1:], fdiag/H, foff/H[:-1])
 
-    @staticmethod
-    def _aplicar(diag, off, phi):
-        phi = phi.reshape(-1).to(device=diag.device, dtype=diag.dtype)
-        result = diag * phi
-        result[:-1] += off * phi[1:]
-        result[1:] += off * phi[:-1]
-        return result
-
-    def forward(self, phi):
-        return self._aplicar(self.a_diag, self.a_off, phi)
-
-    def diagonal(self):
-        return self.a_diag
-
-    def aplicar_contorno_fluxo(self, phi):
-        phi = phi.clone()
-        if self.cond_esquerda == 'vácuo':
-            phi[0] = 0.
-        if self.cond_direita == 'vácuo':
-            phi[-1] = 0.
-        return phi
-
-    def aplicar_fissao_numpy(self, phi):
-        """Produto M_f phi na CPU para a iteracao externa de potencia."""
-        diag = self._fdiag_numpy
-        off = self._foff_numpy
-        result = diag * np.asarray(phi)
-        result[:-1] += off * phi[1:]
-        result[1:] += off * phi[:-1]
-        return result
-
-    def matriz_tridiagonal_numpy(self, rhs=None):
-        diag = self.a_diag.detach().cpu().numpy().copy()
-        off = self.a_off.detach().cpu().numpy().copy()
-        rhs = np.zeros(len(diag)) if rhs is None else np.asarray(rhs, dtype=float).copy()
-        if self.cond_esquerda == 'vácuo':
-            rhs[0] = 0.
-        if self.cond_direita == 'vácuo':
-            rhs[-1] = 0.
-        return off.copy(), diag, off.copy(), rhs
+    def criar_nivel_grosso(self, x):
+        return OperadorMEF1D(x, self.materiais, self.cond_esquerda,
+                            self.cond_direita, dtype=self.x.dtype)
 
 
-class TransferenciaMEF1D(nn.Module):
-    """P interpola os valores nodais; P^T restringe os residuos integrados.
-
-    A restricao e a adjunta da interpolacao, sem dividir por dois: o residuo
-    MEF e uma carga integrada. Nenhuma matriz densa precisa ser armazenada.
-    """
-
-    def __init__(self, fino, grosso):
-        super().__init__()
-        right = torch.searchsorted(grosso, fino).clamp(1, grosso.numel()-1)
-        left = right - 1
-        weight = (fino - grosso[left]) / (grosso[right] - grosso[left])
-        self.n_grosso = grosso.numel()
-        self.register_buffer('left', left)
-        self.register_buffer('right', right)
-        self.register_buffer('weight', weight)
-
-    def prolongar(self, phi):
-        return (1-self.weight) * phi[self.left] + self.weight * phi[self.right]
-
-    def restringir(self, residual):
-        result = residual.new_zeros(self.n_grosso)
-        result.index_add_(0, self.left, (1-self.weight) * residual)
-        result.index_add_(0, self.right, self.weight * residual)
-        return result
-
-
-class SolverFonteFixaMEF1D(SolverFonteFixaUNet1D):
-    """Mesmo ciclo V/U-Net; operadores MEF rediscretizados em malhas aninhadas.
-
-    As coordenadas reais dos nos sao preservadas no engrossamento, inclusive
-    com N impar. Interfaces que coincidem com nos continuam em todos os niveis.
-    O nivel mais grosso usa somente Jacobi ponderado.
-    """
-
-    norma_rhs_minima = 1e-30
-
-    def _resolver_grosso(self, operador, rhs, chute=None):
-        # Se a malha inteira e grossa (N=1 ou 3), os ciclos sucessivos devem
-        # continuar a suavizacao; reiniciar em zero impediria refinar o residuo.
-        phi = torch.zeros_like(rhs) if chute is None else chute.clone()
-        phi = operador.aplicar_contorno_fluxo(phi)
-        return self._suavizar_jacobi(operador, phi, rhs, operador.diagonal(), self.suavizacoes_grosso)
-
-    def _construir_hierarquia(self):
-        self.transferencias = nn.ModuleList()
-        atual = self.operador_A
-        for _ in range(1, self.max_niveis):
-            x = atual.x.detach().cpu().numpy()
-            if len(x) < 2*self.min_pontos_grosso-1:
-                break
-            selected = set(range(0, len(x), 2)) | {len(x)-1}
-            for m in atual.materiais:
-                for key in ('inicio', 'fim'):
-                    selected.update(np.flatnonzero(np.isclose(x, m[key], atol=1e-12, rtol=0)).tolist())
-            indices = sorted(selected)
-            if len(indices) >= len(x):
-                break
-            coarse = OperadorMEF1D(x[indices], atual.materiais, atual.cond_esquerda,
-                                   atual.cond_direita).to(atual.x.device)
-            self.transferencias.append(TransferenciaMEF1D(atual.x, coarse.x))
-            self.operadores.append(coarse)
-            atual = coarse
-
-    def _restringir(self, fine, nivel=0):
-        residual = self.transferencias[nivel].restringir(fine)
-        return self.operadores[nivel+1].aplicar_contorno_fluxo(residual)
-
-    def _prolongar(self, coarse, tamanho_fino, nivel=0):
-        return self.transferencias[nivel].prolongar(coarse)
+# Compatibilidade de importacao: NAO existe mais um segundo ciclo multigrid.
+SolverFonteFixaMEF1D = SolverFonteFixaUNet1D
 
 
 # ============================================================================
-# 6. ITERACAO DE POTENCIA E NORMALIZACAO
+# 7. ITERACAO DE POTENCIA E NORMALIZACAO
 # ============================================================================
 
 """Iteracao de potencia e diagnosticos; base v4.1 preservada."""
@@ -667,7 +595,7 @@ class SolverDifusaoAI4PDEs:
                  omega_fonte=0.75, amortecimento_unet=0.20,
                  tol_fonte=None, max_iter_fonte=5000,
                  metodo_fonte="unet_multigrid", guardar_historicos_fonte=False,
-                 permitir_thomas_comparacao=False, discretizacao='mdf'):
+                 permitir_thomas_comparacao=False, discretizacao='mdf', precisao='float64'):
 
         self.discretizacao = str(discretizacao).lower()
         if self.discretizacao not in ('mdf', 'mef'):
@@ -678,7 +606,10 @@ class SolverDifusaoAI4PDEs:
             raise ValueError('As tolerancias devem ser positivas.')
         if N == 1 and cond_esquerda == cond_direita == 'vácuo':
             raise ValueError('Dois contornos de fluxo nulo requerem N >= 2.')
-        self.dtype = torch.float64 if self.discretizacao == 'mef' else torch.float32
+        if precisao not in ('float32', 'float64'):
+            raise ValueError('Precisao deve ser float32 ou float64.')
+        self.precisao = precisao
+        self.dtype = getattr(torch, precisao)
         self.L = L
         self.N = N
         self.h = L / N
@@ -793,21 +724,21 @@ class SolverDifusaoAI4PDEs:
         return result
 
     def fonte_fissao(self, phi):
-        """MDF: produto nodal; MEF: produto com a matriz de massa de fissao."""
-        if self.discretizacao == 'mef':
-            return self.modelo_A.aplicar_fissao_numpy(phi)
-        return self.nuSigma_f_arr * phi
+        """Mesmo caminho Conv1d fixo para F_MDF diagonal e F_MEF consistente."""
+        if torch.is_tensor(phi):
+            return self.modelo_A.aplicar_fissao(phi)
+        return self._numpy(self.modelo_A.aplicar_fissao(self._tensor(phi)))
 
     def integral_fissao(self, phi):
-        source = self.fonte_fissao(phi)
-        return float(np.sum(source)) if self.discretizacao == 'mef' else self.calcular_integral(source)
+        return float(np.dot(self.modelo_A.pesos_producao_numpy, phi))
 
     def descricao_discretizacao(self):
         if self.discretizacao == 'mef':
-            return ('MEF Galerkin P1: (K + M_a) phi = M_f phi/k, massa consistente; '
-                    'operadores locais fixos em PyTorch, restricao P^T e interpolacao linear.')
-        return ('MDF: stencil conservativo local em PyTorch; restricao full-weighting '
-                'e prolongamento por interpolacao linear.')
+            formulation = 'MEF P1: A=H^-1(K+M_a), F=H^-1 M_f, massa consistente (sem lumping). '
+        else:
+            formulation = 'MDF conservativo: difusao com media harmonica e fissao diagonal. '
+        return (formulation + 'Banco Conv1d fixo comum para A/F; mesmo ciclo V, '
+                'Jacobi, P linear e R=Hc^-1 P^T Hf. Precisao: ' + self.precisao + '.')
 
     @staticmethod
     def nome_metodo(metodo):
@@ -829,17 +760,18 @@ class SolverDifusaoAI4PDEs:
         inicio_operador = time.perf_counter()
         if self.discretizacao == 'mef':
             self.modelo_A = OperadorMEF1D(self.x, self.materiais,
-                                          self.cond_esquerda, self.cond_direita)
+                                          self.cond_esquerda, self.cond_direita, dtype=self.dtype)
         else:
             self.modelo_A = OperadorDifusao1D(self.D_arr, self.Sigma_a_arr, self.h,
-                                              self.cond_esquerda, self.cond_direita)
+                                              self.cond_esquerda, self.cond_direita,
+                                              x=self.x, materiais=self.materiais,
+                                              nuSigma_f_arr=self.nuSigma_f_arr, dtype=self.dtype)
         self.tempos_detalhados["tempo_montagem_operador_s"] += time.perf_counter() - inicio_operador
 
         inicio_hierarquia = time.perf_counter()
         self.solver_fonte_fixa = None
         if self.metodo_fonte == 'unet_multigrid':
-            factory = SolverFonteFixaMEF1D if self.discretizacao == 'mef' else SolverFonteFixaUNet1D
-            self.solver_fonte_fixa = factory(self.modelo_A, omega=self.omega_fonte,
+            self.solver_fonte_fixa = SolverFonteFixaUNet1D(self.modelo_A, omega=self.omega_fonte,
                                             amortecimento_unet=self.amortecimento_unet)
         self.tempos_detalhados["tempo_montagem_hierarquia_s"] += time.perf_counter() - inicio_hierarquia
         self._sincronizar()
@@ -895,7 +827,7 @@ class SolverDifusaoAI4PDEs:
         phi_tensor = self._tensor(phi_np)
         residuo_tensor = self._tensor(rhs) - self.modelo_A(phi_tensor)
         residuo = float(torch.linalg.vector_norm(residuo_tensor, ord=float('inf')).item())
-        norma_rhs = max(float(np.linalg.norm(rhs, ord=np.inf)), 1.0)
+        norma_rhs = max(float(np.linalg.norm(rhs, ord=np.inf)), torch.finfo(self.dtype).tiny)
         self.iteracoes_fonte_fixa.append(1)
         self.residuos_fonte_fixa.append(residuo)
         self.convergiu_fonte_fixa.append(True)
@@ -936,8 +868,7 @@ class SolverDifusaoAI4PDEs:
             self.phi_ref = None
 
     def normalizar_potencia(self, phi):
-        P_atual = 3.2e-11 * (self.integral_fissao(phi) if self.discretizacao == 'mef'
-                            else np.sum(self.nuSigma_f_arr * phi * self.h))
+        P_atual = 3.2e-11 * self.integral_fissao(phi)
         if P_atual > 0:
             return phi * (self.potencia_nominal / P_atual)
         return phi
@@ -981,13 +912,11 @@ class SolverDifusaoAI4PDEs:
         self.criar_operador_A()
         self.calcular_referencias()
         n = self.N + 1
-        nuSigma_f = self.nuSigma_f_arr
         phi = np.ones(n)
-        if self.discretizacao == 'mef':
-            if self.cond_esquerda == 'vácuo':
-                phi[0] = 0.
-            if self.cond_direita == 'vácuo':
-                phi[-1] = 0.
+        if self.cond_esquerda == 'vácuo':
+            phi[0] = 0.
+        if self.cond_direita == 'vácuo':
+            phi[-1] = 0.
         k_eff = 1.0
         self.historico_k = []
         self.historico_phi = []
@@ -1010,6 +939,7 @@ class SolverDifusaoAI4PDEs:
         print(f"Malha: {self.N} intervalos, h = {self.h:.4f} cm")
         print(f"Tipo: {'Homogêneo' if self.is_homogeneo else 'Heterogêneo'}")
         print(f"Método: {self.metodo_executado}")
+        print(f"Precisao comum: {self.precisao}")
         print(f"Dispositivo: {self.nome_dispositivo}")
         if self.k_ref:
             print(f"k_ref: {self.k_ref:.8f} ({self.fonte_ref})")
@@ -1020,9 +950,12 @@ class SolverDifusaoAI4PDEs:
         for iteracao in range(1, self.max_iter + 1):
             inicio_iter = time.perf_counter()
             inicio_preparacao = time.perf_counter()
-            S = self.fonte_fissao(phi) / k_eff
-            self.tempos_detalhados['tempo_preparacao_fonte_s'] += time.perf_counter()-inicio_preparacao
-            S_tensor = self._tensor(S)
+            transf_antes = self.tempos_detalhados['tempo_transferencia_numpy_torch_s']
+            S_tensor = self.fonte_fissao(self._tensor(phi)) / k_eff
+            self._sincronizar()
+            transf_preparacao = self.tempos_detalhados['tempo_transferencia_numpy_torch_s'] - transf_antes
+            self.tempos_detalhados['tempo_preparacao_fonte_s'] += max(
+                0., time.perf_counter()-inicio_preparacao-transf_preparacao)
 
             inicio_fonte = time.perf_counter()
             transf_antes = (self.tempos_detalhados['tempo_transferencia_numpy_torch_s']
@@ -1139,6 +1072,11 @@ class SolverDifusaoAI4PDEs:
             "Discretizacao": self.discretizacao.upper(),
             "Nos": self.N + 1,
             "Precisao": str(self.dtype),
+            "Ciclo": "V" if self.solver_fonte_fixa is not None else "nao se aplica",
+            "Niveis": len(self.solver_fonte_fixa.operadores) if self.solver_fonte_fixa is not None else 0,
+            "Pre_suavizacoes": self.solver_fonte_fixa.pre_suavizacoes if self.solver_fonte_fixa is not None else 0,
+            "Post_suavizacoes": self.solver_fonte_fixa.post_suavizacoes if self.solver_fonte_fixa is not None else 0,
+            "Suavizacoes_grosso": self.solver_fonte_fixa.suavizacoes_grosso if self.solver_fonte_fixa is not None else 0,
             "Método": self.nome_metodo(self.metodo_fonte),
             "N": self.N,
             "k_eff": self.k_eff,
@@ -1185,7 +1123,7 @@ def executar_comparacao_resolvedores(config_base, metodos=("unet_multigrid", "th
 
 
 # ============================================================================
-# 7. INTERFACE TKINTER E RELATORIOS
+# 8. INTERFACE TKINTER E RELATORIOS
 # ============================================================================
 
 """Interface Tkinter, graficos e relatorios; base v4.1 preservada."""
@@ -1455,7 +1393,11 @@ class DifusaoGUI_AI4PDEs:
             self.painel_controles, textvariable=self.discretizacao_var,
             values=['MDF', 'MEF'], state='readonly', width=16,
         )
-        self.discretizacao_combo.grid(row=row, column=1, columnspan=3, sticky=tk.W, padx=3)
+        self.discretizacao_combo.grid(row=row, column=1, sticky=tk.W, padx=3)
+        ttk.Label(self.painel_controles, text="Precisão:").grid(row=row, column=2, sticky=tk.W)
+        self.precisao_var = tk.StringVar(value='float64')
+        ttk.Combobox(self.painel_controles, textvariable=self.precisao_var,
+                     values=['float64', 'float32'], state='readonly', width=9).grid(row=row, column=3, padx=3)
         row += 1
 
         ttk.Label(self.painel_controles, text="Condições:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=3)
@@ -1685,7 +1627,8 @@ class DifusaoGUI_AI4PDEs:
 | c = Sigma_a (absorcao) ou nuSigma_f (fissao).                  |
 | Massa consistente; materiais integrados por elemento/regiao.   |
 | Reflexiva: corrente nula natural. Vacuo: fluxo nulo.            |
-| Multigrid: operadores MEF, restricao P^T e interpolacao P.      |
+| A/F por Conv1d fixa; MEF escalonado por H^-1, sem lumping.      |
+| Mesmo ciclo V e R=Hc^-1 P^T Hf nas duas discretizacoes.         |
 | Thomas verifica o mesmo sistema e nao entra no ciclo V.        |
 +----------------------------------------------------------------+
 
@@ -2039,6 +1982,7 @@ class DifusaoGUI_AI4PDEs:
         return {
             "L": L,
             "discretizacao": self.discretizacao_var.get().lower(),
+            "precisao": self.precisao_var.get(),
             "N": N,
             "materiais": [dict(m) for m in self.materiais_atual],
             "cond_esquerda": esquerda,
@@ -2181,6 +2125,7 @@ class DifusaoGUI_AI4PDEs:
             N_list = self.obter_lista_N_tabela()
             materiais = [dict(m) for m in self.materiais_atual]
             discretizacao_tabela = self.discretizacao_var.get().lower()
+            precisao_tabela = self.precisao_var.get()
             metodo_tabela = self.metodo_fonte_var.get()
             if metodo_tabela == "ambos":
                 metodo_tabela = "unet_multigrid"
@@ -2226,6 +2171,7 @@ class DifusaoGUI_AI4PDEs:
                         tol_fonte=tol_fonte,
                         max_iter_fonte=max_iter_fonte,
                         discretizacao=discretizacao_tabela,
+                        precisao=precisao_tabela,
                         metodo_fonte=metodo_tabela
                     )
                     k_eff, phi = solver.resolver(metodo_fonte=metodo_tabela)
@@ -2235,6 +2181,7 @@ class DifusaoGUI_AI4PDEs:
                     resultado = {
                         'N': N,
                         'discretizacao': solver.discretizacao.upper(),
+                        'precisao': solver.precisao,
                         'nos': N + 1,
                         'k_eff': k_eff,
                         'iteracoes': solver.iteracoes_totais,
@@ -2740,7 +2687,9 @@ class DifusaoGUI_AI4PDEs:
                 ["Máx. iterações fonte fixa (solver principal)", f"{self.solver.max_iter_fonte}"],
                 ["Omega fonte fixa", f"{self.solver.omega_fonte:.3f}"],
                 ["Fator de relaxação da correção multigrid", f"{self.solver.amortecimento_unet:.3f}"],
-                ["Método", "Neural Physics: operador conservativo local em PyTorch + U-Net/multigrid"],
+                ["Método", "Neural Physics: stencils locais por banco Conv1d fixo + U-Net/multigrid"],
+                ["Transferências", "P linear; R=Hc^-1 P^T Hf (mesmas rotinas MDF/MEF)"],
+                ["Ciclo / suavização", "V; 2 pré, 2 pós, 20 Jacobi no grosso; até 6 níveis"],
                 ["Pesos treináveis", "Não"],
                 ["Relação com AI4PDEs", "Adaptação 1D local da filosofia do pacote"]
             ]
@@ -3058,7 +3007,7 @@ class DifusaoGUI_AI4PDEs:
 
 
 # ============================================================================
-# 8. EXPERIMENTOS E EXPORTACAO PARA ARTIGO
+# 9. EXPERIMENTOS E EXPORTACAO PARA ARTIGO
 # ============================================================================
 
 """Experimentos reprodutiveis, CSVs e figuras; base v4.1."""
@@ -3216,6 +3165,7 @@ def executar_solver_artigo(caso_id, caso_cfg, N, metodo, args):
         guardar_historicos_fonte=False,
         permitir_thomas_comparacao=permitir_thomas,
         discretizacao=args.discretizacao,
+        precisao=args.precisao,
     )
     solver.resolver(metodo_fonte=metodo)
     resumo = solver.resumo_resultado(caso_cfg["nome"])
@@ -3383,7 +3333,8 @@ def gerar_relatorio_experimental(caminhos, resultados, comparacoes, refinamento,
         "Escopo: comparação enxuta entre Neural Physics/U-Net multigrid, Thomas e referência Couto (2003) no caso heterogêneo.",
         'Discretizacao: ' + caminhos.get('discretizacao', '') + '. N = intervalos/elementos; nos = N+1.',
         'MEF: Galerkin P1 com massa consistente. Vacuo significa fluxo nulo na fronteira.',
-        'Precisao: MDF float32; MEF float64. Os tempos nao isolam o efeito da discretizacao.',
+        'Precisao comum: ' + caminhos.get('precisao', 'float64') + '. Mesmo banco Conv1d, ciclo V, malhas e transferencias para MDF/MEF.',
+        'MEF: A=H^-1(K+M_a), F=H^-1 M_f; R=Hc^-1 P^T Hf para ambos. A massa permanece consistente.',
         'As colunas convergiu_np e convergiu_thomas dos CSVs identificam resultados sem convergencia.',
         "",
         "## Comparações principais",
@@ -3419,21 +3370,27 @@ def gerar_relatorio_experimental(caminhos, resultados, comparacoes, refinamento,
         story.append(Paragraph("Escopo: Neural Physics/U-Net multigrid, Thomas e Couto (2003).", normal))
         story.append(Paragraph('Discretizacao: ' + caminhos.get('discretizacao', '')
                                + '. N = intervalos/elementos; nos = N+1. MEF: Galerkin P1, massa consistente.', normal))
-        story.append(Paragraph('Precisao: MDF float32; MEF float64. Tempos nao isolam o efeito da discretizacao. '
+        story.append(Paragraph('Precisao comum: ' + caminhos.get('precisao', 'float64') + '. Mesmo banco Conv1d, ciclo V e transferencias. '
                                'Consulte nos CSVs os indicadores de convergencia antes de usar os resultados.', normal))
+        story.append(Paragraph('MEF: A=H^-1(K+M_a), F=H^-1 M_f, sem lumping. Para ambos, R=Hc^-1 P^T Hf. '
+                               'Ciclo V: ate 6 niveis, 2 passos pre/pos e 20 passos Jacobi no grosso; sem solver direto.', normal))
         story.append(Spacer(1, 0.3*cm))
         story.append(Paragraph("Comparações principais", h2))
         data = [["Caso", "N", "k NP", "k Thomas", "erro k", "phi inf", "phi L2", "Conv."]]
         for r in comparacoes:
             data.append([r['caso_id'], r['N'], f"{r['k_np']:.8f}", f"{r['k_thomas']:.8f}", f"{r['erro_k_np_thomas']:.2e}", f"{r['erro_fluxo_inf_np_thomas']:.2e}", f"{r['erro_fluxo_l2_np_thomas']:.2e}", 'sim' if r['convergiu_np'] and r['convergiu_thomas'] else 'NAO'])
-        tbl = Table(data, repeatRows=1)
+        largura = A4[0] - 3.2*cm
+        tbl = Table(data, repeatRows=1,
+                    colWidths=[largura*w for w in (.16,.04,.12,.12,.12,.12,.12,.08)])
         tbl.setStyle(TableStyle([
             ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
             ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
             ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('LEFTPADDING', (0,0), (-1,-1), 3),
+            ('RIGHTPADDING', (0,0), (-1,-1), 3),
         ]))
         story.append(tbl)
-        story.append(Spacer(1, 0.3*cm))
+        story.append(PageBreak())
         story.append(Paragraph("Tempos separados", h2))
         data_tempo = [["Caso", "N", "Método", "Mont.", "Transf.", "Iter.", "Fonte", "Total"]]
         for r in comparacoes:
@@ -3453,11 +3410,14 @@ def gerar_relatorio_experimental(caminhos, resultados, comparacoes, refinamento,
                 f"{r['tempo_thomas_fonte_fixa_s']:.3f}",
                 f"{r['tempo_thomas_s']:.3f}",
             ])
-        tbl_tempo = Table(data_tempo, repeatRows=1)
+        tbl_tempo = Table(data_tempo, repeatRows=1,
+                          colWidths=[largura*w for w in (.16,.04,.14,.132,.132,.132,.132,.132)])
         tbl_tempo.setStyle(TableStyle([
             ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
             ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
             ('FONTSIZE', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 3),
+            ('RIGHTPADDING', (0,0), (-1,-1), 3),
         ]))
         story.append(tbl_tempo)
         story.append(PageBreak())
@@ -3482,6 +3442,7 @@ def executar_experimento_artigo(args):
         return executar_duas_discretizacoes(args)
     caminhos = criar_estrutura_saida(args.saida)
     caminhos['discretizacao'] = args.discretizacao.upper()
+    caminhos['precisao'] = args.precisao
     hardware = registrar_hardware(caminhos)
     with open(os.path.join(caminhos['base'], 'configuracao.json'), 'w', encoding='utf-8') as f:
         json.dump({'parametros': vars(args), 'problemas': problemas_artigo()}, f, indent=2, ensure_ascii=False)
@@ -3510,7 +3471,8 @@ def executar_experimento_artigo(args):
                     historico_keff.append({"caso_id": caso_id, "discretizacao": args.discretizacao, "N": N, "metodo": metodo, "iteracao": i, "k_eff": float(k)})
                 for i, (it_fonte, res_fonte, conv) in enumerate(zip(solver.iteracoes_fonte_fixa, solver.residuos_fonte_fixa, solver.convergiu_fonte_fixa), start=1):
                     historico_residuo.append({"caso_id": caso_id, "discretizacao": args.discretizacao, "N": N, "metodo": metodo, "chamada_fonte": i, "iteracoes_fonte": int(it_fonte), "residuo_final": float(res_fonte), "convergiu": bool(conv)})
-                tr = {"caso_id": caso_id, "discretizacao": args.discretizacao, "N": N, "metodo": metodo}
+                tr = {"caso_id": caso_id, "discretizacao": args.discretizacao,
+                      "precisao": args.precisao, "N": N, "metodo": metodo}
                 tr.update(solver.tempos_detalhados)
                 tempos.append(tr)
 
@@ -3528,6 +3490,7 @@ def executar_experimento_artigo(args):
         linha = {
             "caso_id": caso_id,
             "discretizacao": args.discretizacao,
+            "precisao": np_solver.precisao,
             "N": N,
             "k_np": float(np_solver.k_eff),
             "k_thomas": float(th_solver.k_eff),
@@ -3621,6 +3584,7 @@ def executar_duas_discretizacoes(args):
     todos_resultados = [row for campanha in campanhas for row in campanha['_resultados']]
     todas_figuras = [item for campanha in campanhas for item in campanha['_figuras']]
     caminhos['discretizacao'] = 'MDF + MEF'
+    caminhos['precisao'] = args.precisao
     gerar_relatorio_experimental(caminhos, todos_resultados, todas_cmp, todas_cmp, todas_figuras)
     gerar_tabelas_latex(caminhos, todas_cmp, todas_cmp)
     with open(os.path.join(caminhos['relatorios'], 'indice.md'), 'w', encoding='utf-8') as f:
@@ -3637,6 +3601,8 @@ def construir_parser():
     grupo.add_argument("--experimento-artigo", action="store_true", help="executa o pacote experimental sem GUI")
     parser.add_argument('--discretizacao', choices=['mdf', 'mef', 'ambos'], default='mdf',
                         help='MDF ou MEF P1; ambos executa e consolida duas campanhas')
+    parser.add_argument('--precisao', choices=['float64', 'float32'], default='float64',
+                        help='mesma precisao para MDF e MEF (padrao float64)')
     parser.add_argument("--saida", default="resultados_artigo_v4_2", help="pasta de saída dos resultados")
     parser.add_argument("--malhas-homogeneo", default="1,13,26,52,100,104", help="lista de N para o caso homogêneo, separada por vírgulas")
     parser.add_argument("--malhas-heterogeneo", default="3,12,48,96,192,300,384", help="lista de N para o caso heterogêneo, separada por vírgulas")
@@ -3673,6 +3639,7 @@ def main():
     app = DifusaoGUI_AI4PDEs(root)
     if args.discretizacao != 'ambos':
         app.discretizacao_var.set(args.discretizacao.upper())
+    app.precisao_var.set(args.precisao)
     root.mainloop()
 
 

@@ -1,8 +1,8 @@
-"""Operadores MDF e ciclo U-Net/multigrid sem treinamento, base v4.1."""
+"""Stencils MDF e ciclo V/U-Net UNICO para MDF/MEF, sem treinamento."""
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from .stencils import OperadorStencil1D, TransferenciaNodal1D, medidas_nodais
 from dataclasses import dataclass
 
 @dataclass
@@ -52,143 +52,54 @@ def resolver_tridiagonal_thomas(lower, diag, upper, rhs):
     return x
 
 
-class OperadorDifusao1D(nn.Module):
-    """
-    Operador A = -d/dx(D dphi/dx) + Sigma_a phi em forma Neural Physics.
+class OperadorDifusao1D(OperadorStencil1D):
+    """MDF conservativo: mesmas bandas da v4.1 na malha fina uniforme.
 
-    Para meio homogêneo, o stencil interno é aplicado como uma Conv1d fixa:
-
-        [-D/h², 2D/h² + Sigma_a, -D/h²].
-
-    Para meio heterogêneo, o operador é aplicado na forma conservativa usando
-    D_{i+1/2}. A estrutura continua sendo local, stencilada e sem treinamento.
+    Nos niveis grossos nao uniformes, fluxos entre nos sao divididos por H_i.
+    A media harmonica de D nas faces e preservada. A fonte MDF e diagonal.
+    O banco Conv1d e compartilhado com MEF, inclusive para a fissao.
     """
 
-    def __init__(self, D_arr, Sigma_a_arr, h, cond_esquerda='reflexiva', cond_direita='vácuo'):
-        super().__init__()
+    def __init__(self, D_arr, Sigma_a_arr, h, cond_esquerda='reflexiva',
+                 cond_direita='vácuo', *, x=None, materiais=None,
+                 nuSigma_f_arr=None, dtype=torch.float64):
+        D = np.asarray(D_arr, dtype=float)
+        Sa = np.asarray(Sigma_a_arr, dtype=float)
+        x = np.arange(len(D))*h if x is None else np.asarray(x, dtype=float)
+        super().__init__(x, cond_esquerda, cond_direita, dtype)
+        if len(D) != len(x) or Sa.shape != D.shape or np.any(D <= 0) or np.any(Sa < 0):
+            raise ValueError('Coeficientes MDF invalidos.')
         self.h = float(h)
-        self.cond_esquerda = cond_esquerda
-        self.cond_direita = cond_direita
+        self.materiais = tuple(dict(m) for m in (materiais or ()))
+        nf = np.zeros_like(D) if nuSigma_f_arr is None else np.asarray(nuSigma_f_arr, dtype=float)
+        if nf.shape != D.shape or np.any(nf < 0):
+            raise ValueError('Fissao MDF invalida.')
+        face = 2*D[:-1]*D[1:]/(D[:-1]+D[1:])
+        H = medidas_nodais(x)
+        conductance = face/np.diff(x)
+        lower, upper = -conductance/H[1:], -conductance/H[:-1]
+        diag = Sa.copy()
+        diag[1:] -= lower
+        diag[:-1] -= upper
+        for name, value in [('D', D), ('Sigma_a', Sa), ('D_half', face), ('nuSigma_f', nf)]:
+            self.register_buffer(name, torch.tensor(value, dtype=dtype))
+        self.definir_stencils(lower, diag, upper, np.zeros_like(lower), nf, np.zeros_like(upper))
 
-        D_np = np.asarray(D_arr, dtype=np.float32)
-        Sigma_np = np.asarray(Sigma_a_arr, dtype=np.float32)
-        self.register_buffer("D", torch.tensor(D_np, dtype=torch.float32))
-        self.register_buffer("Sigma_a", torch.tensor(Sigma_np, dtype=torch.float32))
-
-        D_left = D_np[:-1]
-        D_right = D_np[1:]
-        D_half = np.zeros_like(D_left, dtype=np.float32)
-        mask = (D_left + D_right) > 0.0
-        D_half[mask] = 2.0 * D_left[mask] * D_right[mask] / (D_left[mask] + D_right[mask])
-        self.register_buffer("D_half", torch.tensor(D_half, dtype=torch.float32))
-
-        self.homogeneo = bool(np.allclose(D_np, D_np[0]) and np.allclose(Sigma_np, Sigma_np[0]))
-
-        h2 = self.h * self.h
-        k_esq = -float(D_np[0]) / h2
-        k_centro = (2.0 * float(D_np[0]) / h2) + float(Sigma_np[0])
-        k_dir = -float(D_np[0]) / h2
-        kernel = torch.tensor([[[k_esq, k_centro, k_dir]]], dtype=torch.float32)
-
-        self.conv_A_homogeneo = nn.Conv1d(1, 1, kernel_size=3, padding=1, padding_mode='replicate', bias=False)
-        with torch.no_grad():
-            self.conv_A_homogeneo.weight.data = kernel
-        for param in self.conv_A_homogeneo.parameters():
-            param.requires_grad = False
-
-    def _vetor(self, phi):
-        if phi.ndim == 3:
-            return phi.view(-1)
-        return phi
-
-    def aplicar_contorno_fluxo(self, phi):
-        phi = phi.clone()
-        # Condicoes de Dirichlet sao impostas diretamente. A condicao
-        # reflexiva ja esta representada na linha de fronteira do operador A,
-        # portanto nao se deve sobrescrever phi[0] = phi[1] a cada suavizacao.
-        if self.cond_esquerda == 'vácuo':
-            phi[0] = 0.0
-
-        if self.cond_direita == 'vácuo':
-            phi[-1] = 0.0
-        return phi
-
-    def diagonal(self):
-        n = self.D.numel()
-        h2 = self.h * self.h
-        diag = torch.zeros(n, device=self.D.device, dtype=torch.float32)
-        diag[1:-1] = (self.D_half[:-1] + self.D_half[1:]) / h2 + self.Sigma_a[1:-1]
-
-        if self.cond_esquerda == 'vácuo':
-            diag[0] = 1.0
+    def criar_nivel_grosso(self, x):
+        if self.materiais:
+            values = []
+            for point in x:
+                matches = [m for m in self.materiais if m['inicio'] <= point <= m['fim']]
+                if not matches:
+                    raise ValueError('Material MDF ausente na malha grossa.')
+                values.append([matches[0][k] for k in ('D', 'Sigma_a', 'nuSigma_f')])
+            D, Sa, nf = np.asarray(values).T
         else:
-            diag[0] = 2.0 * self.D[0] / h2 + self.Sigma_a[0]
-
-        if self.cond_direita == 'vácuo':
-            diag[-1] = 1.0
-        else:
-            diag[-1] = 2.0 * self.D[-1] / h2 + self.Sigma_a[-1]
-        return torch.clamp(diag, min=1.0e-20)
-
-    def matriz_tridiagonal_numpy(self, rhs=None):
-        """Monta lower, diag, upper e rhs pela mesma discretização do operador."""
-        D = self.D.detach().cpu().numpy().astype(float)
-        Sigma_a = self.Sigma_a.detach().cpu().numpy().astype(float)
-        D_half = self.D_half.detach().cpu().numpy().astype(float)
-        n = D.size
-        h2 = self.h * self.h
-
-        lower = np.zeros(n - 1, dtype=float)
-        diag = np.zeros(n, dtype=float)
-        upper = np.zeros(n - 1, dtype=float)
-        rhs_np = np.zeros(n, dtype=float) if rhs is None else np.asarray(rhs, dtype=float).copy()
-
-        for i in range(1, n - 1):
-            lower[i - 1] = -D_half[i - 1] / h2
-            diag[i] = (D_half[i - 1] + D_half[i]) / h2 + Sigma_a[i]
-            upper[i] = -D_half[i] / h2
-
-        if self.cond_esquerda == 'vácuo':
-            diag[0] = 1.0
-            upper[0] = 0.0
-            rhs_np[0] = 0.0
-        elif self.cond_esquerda == 'reflexiva':
-            diag[0] = 2.0 * D[0] / h2 + Sigma_a[0]
-            upper[0] = -2.0 * D[0] / h2
-
-        if self.cond_direita == 'vácuo':
-            diag[-1] = 1.0
-            lower[-1] = 0.0
-            rhs_np[-1] = 0.0
-        elif self.cond_direita == 'reflexiva':
-            lower[-1] = -2.0 * D[-1] / h2
-            diag[-1] = 2.0 * D[-1] / h2 + Sigma_a[-1]
-
-        return lower, diag, upper, rhs_np
-
-    def forward(self, phi):
-        phi = self._vetor(phi).to(self.D.device).float()
-        h2 = self.h * self.h
-
-        if self.homogeneo:
-            out = self.conv_A_homogeneo(phi.view(1, 1, -1)).view(-1)
-        else:
-            out = torch.zeros_like(phi)
-            grad = (phi[1:] - phi[:-1]) / self.h
-            corrente = self.D_half * grad
-            out[1:-1] = -(corrente[1:] - corrente[:-1]) / self.h + self.Sigma_a[1:-1] * phi[1:-1]
-
-        if self.cond_esquerda == 'vácuo':
-            out[0] = phi[0]
-        elif self.cond_esquerda == 'reflexiva':
-            out[0] = (2.0 * self.D[0] / h2 + self.Sigma_a[0]) * phi[0] - (2.0 * self.D[0] / h2) * phi[1]
-
-        if self.cond_direita == 'vácuo':
-            out[-1] = phi[-1]
-        elif self.cond_direita == 'reflexiva':
-            out[-1] = -(2.0 * self.D[-1] / h2) * phi[-2] + (2.0 * self.D[-1] / h2 + self.Sigma_a[-1]) * phi[-1]
-
-        return out
+            D, Sa, nf = [np.interp(x, self.x_numpy, t.detach().cpu().numpy())
+                         for t in (self.D, self.Sigma_a, self.nuSigma_f)]
+        return OperadorDifusao1D(D, Sa, np.diff(x)[0], self.cond_esquerda,
+                                 self.cond_direita, x=x, materiais=self.materiais,
+                                 nuSigma_f_arr=nf, dtype=self.x.dtype)
 
 
 class SolverFonteFixaUNet1D(nn.Module):
@@ -198,7 +109,7 @@ class SolverFonteFixaUNet1D(nn.Module):
     Não há treinamento. As operações são:
     - aplicação do operador A por stencil/convolução fixa;
     - suavização por Jacobi ponderado;
-    - restrição full-weighting para malhas grossas;
+    - restricao ponderada R=Hc^-1 P^T Hf para malhas grossas;
     - prolongamento por interpolação linear;
     - operadores rediscretizados em todos os níveis;
     - solução no nível mais grosso e correção nos níveis finos.
@@ -221,37 +132,25 @@ class SolverFonteFixaUNet1D(nn.Module):
         self.operadores = nn.ModuleList([operador_A])
         self._construir_hierarquia()
 
-    def _coarsen_array(self, values):
-        """Coarsening nodal por full weighting, preservando as fronteiras."""
-        if values.numel() <= self.min_pontos_grosso:
-            return values
-        coarse_n = (values.numel() - 1) // 2 + 1
-        coarse = torch.empty(coarse_n, device=values.device, dtype=values.dtype)
-        coarse[0] = values[0]
-        coarse[-1] = values[-1]
-        for j in range(1, coarse_n - 1):
-            i = 2 * j
-            coarse[j] = 0.25 * values[i - 1] + 0.50 * values[i] + 0.25 * values[i + 1]
-        return coarse
-
     def _construir_hierarquia(self):
-        """Cria operadores A_h, A_2h, A_4h, ... por rediscretização geométrica."""
+        """Mesmas malhas aninhadas para as duas formulacoes; so A/F diferem."""
+        self.transferencias = nn.ModuleList()
         atual = self.operador_A
         for _ in range(1, self.max_niveis):
-            n_fino = atual.D.numel()
-            if n_fino <= self.min_pontos_grosso or n_fino < 2 * self.min_pontos_grosso - 1:
+            x = atual.x_numpy
+            if len(x) < 2*self.min_pontos_grosso-1:
                 break
-            D_c = self._coarsen_array(atual.D).detach().cpu().numpy()
-            Sigma_c = self._coarsen_array(atual.Sigma_a).detach().cpu().numpy()
-            op_c = OperadorDifusao1D(
-                D_c,
-                Sigma_c,
-                atual.h * 2.0,
-                atual.cond_esquerda,
-                atual.cond_direita,
-            ).to(atual.D.device)
-            self.operadores.append(op_c)
-            atual = op_c
+            selected = set(range(0, len(x), 2)) | {len(x)-1}
+            for mat in atual.materiais:
+                for key in ('inicio', 'fim'):
+                    selected.update(np.flatnonzero(np.isclose(x, mat[key], atol=1e-12, rtol=0)).tolist())
+            indices = sorted(selected)
+            if len(indices) >= len(x):
+                break
+            coarse = atual.criar_nivel_grosso(x[indices]).to(atual.x.device)
+            self.transferencias.append(TransferenciaNodal1D(atual.x, coarse.x))
+            self.operadores.append(coarse)
+            atual = coarse
 
     def _corrigir_contorno_rhs(self, rhs):
         rhs = rhs.clone()
@@ -271,22 +170,16 @@ class SolverFonteFixaUNet1D(nn.Module):
         return phi
 
     def _restringir(self, fine, nivel=0):
-        """Restrição full-weighting: I_h^2h r_h."""
-        return self._coarsen_array(fine)
+        residual = self.transferencias[nivel].restringir(fine)
+        return self.operadores[nivel+1].aplicar_contorno_fluxo(residual)
 
     def _prolongar(self, coarse, tamanho_fino, nivel=0):
-        """Prolongamento linear: I_2h^h e_2h."""
-        return F.interpolate(
-            coarse.view(1, 1, -1),
-            size=tamanho_fino,
-            mode='linear',
-            align_corners=True,
-        ).view(-1)
+        return self.transferencias[nivel].prolongar(coarse)
 
     def _resolver_grosso(self, operador, rhs, chute=None):
         """Resolve o nível mais grosso por Jacobi, sem solver direto clássico."""
         diag = operador.diagonal()
-        phi = torch.zeros_like(rhs)
+        phi = torch.zeros_like(rhs) if chute is None else chute.clone()
         phi = operador.aplicar_contorno_fluxo(phi)
         return self._suavizar_jacobi(operador, phi, rhs, diag, self.suavizacoes_grosso)
 
@@ -317,9 +210,8 @@ class SolverFonteFixaUNet1D(nn.Module):
             phi = chute.clone().to(dtype=dtype)
         phi = self.operador_A.aplicar_contorno_fluxo(phi)
 
-        diag = self.operador_A.diagonal()
         norma_rhs = max(float(torch.linalg.vector_norm(rhs, ord=float('inf')).item()),
-                        getattr(self, 'norma_rhs_minima', 1.0))
+                        torch.finfo(dtype).tiny)
         ultimo_residuo = float('inf')
         historico_residuo = []
 

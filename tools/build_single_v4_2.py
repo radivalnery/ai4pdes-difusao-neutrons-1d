@@ -17,11 +17,12 @@ MODULES = [
     ('method.py', '1. DESCRICAO DO METODO'),
     ('references.py', '2. SOLUCOES ANALITICAS'),
     ('metrics.py', '3. METRICAS DO FLUXO'),
-    ('models.py', '4. OPERADOR MDF E CICLO MULTIGRID'),
-    ('fem.py', '5. FORMULACAO MEF P1 E TRANSFERENCIAS'),
-    ('solver.py', '6. ITERACAO DE POTENCIA E NORMALIZACAO'),
-    ('gui.py', '7. INTERFACE TKINTER E RELATORIOS'),
-    ('experiments.py', '8. EXPERIMENTOS E EXPORTACAO PARA ARTIGO'),
+    ('stencils.py', '4. CONVOLUCOES E TRANSFERENCIAS COMUNS MDF/MEF'),
+    ('models.py', '5. OPERADOR MDF E CICLO MULTIGRID UNICO'),
+    ('fem.py', '6. FORMULACAO MEF P1 COM MASSA CONSISTENTE'),
+    ('solver.py', '7. ITERACAO DE POTENCIA E NORMALIZACAO'),
+    ('gui.py', '8. INTERFACE TKINTER E RELATORIOS'),
+    ('experiments.py', '9. EXPERIMENTOS E EXPORTACAO PARA ARTIGO'),
 ]
 
 
@@ -45,6 +46,7 @@ Arquivo unico gerado de src/neutron_ai4pdes; usa as MESMAS funcoes dos modulos.
 GUI: python difusao_neutrons_neuralphysics_1d_mdf_mef_v4_2.py
 Experimento: acrescente --experimento-artigo --discretizacao mef
 MDF e MEF escolhem a discretizacao; U-Net/multigrid e o resolvedor principal.
+Mesmo banco Conv1d, precisao, transferencias e ciclo V para MDF e MEF.
 Thomas e referencia opcional e nao participa de nenhum nivel do multigrid.
 As versoes antigas e o backup continuam disponiveis separadamente.
 """'''

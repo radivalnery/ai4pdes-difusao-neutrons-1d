@@ -26,6 +26,8 @@ def test_exportacao_dupla_preserva_discretizacao_e_nao_convergencia(tmp_path):
         rows = list(csv.DictReader(stream))
     assert len(rows) == 8
     assert {r['Discretizacao'] for r in rows} == {'MDF', 'MEF'}
+    assert {r['Precisao'] for r in rows} == {'torch.float64'}
+    assert {r['Ciclo'] for r in rows if r['metodo_id'] == 'unet_multigrid'} == {'V'}
     # N=1 com MEF tem um unico grau livre: pode convergir em duas iteracoes.
     # O heterogeneo deliberadamente limitado deve permanecer sinalizado.
     assert all(r['Bateu max_iter externo'] == 'True' for r in rows if 'Heterog' in r['Caso'])

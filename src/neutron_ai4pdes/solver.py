@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch
 from .models import OperadorDifusao1D, SolverFonteFixaUNet1D, resolver_tridiagonal_thomas
-from .fem import OperadorMEF1D, SolverFonteFixaMEF1D
+from .fem import OperadorMEF1D
 from .references import calcular_k_eff_analitico, fluxo_analitico_homogeneo
 from .metrics import erro_forma_fluxo
 
@@ -20,7 +20,7 @@ class SolverDifusaoAI4PDEs:
                  omega_fonte=0.75, amortecimento_unet=0.20,
                  tol_fonte=None, max_iter_fonte=5000,
                  metodo_fonte="unet_multigrid", guardar_historicos_fonte=False,
-                 permitir_thomas_comparacao=False, discretizacao='mdf'):
+                 permitir_thomas_comparacao=False, discretizacao='mdf', precisao='float64'):
         
         self.discretizacao = str(discretizacao).lower()
         if self.discretizacao not in ('mdf', 'mef'):
@@ -31,7 +31,10 @@ class SolverDifusaoAI4PDEs:
             raise ValueError('As tolerancias devem ser positivas.')
         if N == 1 and cond_esquerda == cond_direita == 'vácuo':
             raise ValueError('Dois contornos de fluxo nulo requerem N >= 2.')
-        self.dtype = torch.float64 if self.discretizacao == 'mef' else torch.float32
+        if precisao not in ('float32', 'float64'):
+            raise ValueError('Precisao deve ser float32 ou float64.')
+        self.precisao = precisao
+        self.dtype = getattr(torch, precisao)
         self.L = L
         self.N = N
         self.h = L / N
@@ -146,21 +149,21 @@ class SolverDifusaoAI4PDEs:
         return result
 
     def fonte_fissao(self, phi):
-        """MDF: produto nodal; MEF: produto com a matriz de massa de fissao."""
-        if self.discretizacao == 'mef':
-            return self.modelo_A.aplicar_fissao_numpy(phi)
-        return self.nuSigma_f_arr * phi
+        """Mesmo caminho Conv1d fixo para F_MDF diagonal e F_MEF consistente."""
+        if torch.is_tensor(phi):
+            return self.modelo_A.aplicar_fissao(phi)
+        return self._numpy(self.modelo_A.aplicar_fissao(self._tensor(phi)))
 
     def integral_fissao(self, phi):
-        source = self.fonte_fissao(phi)
-        return float(np.sum(source)) if self.discretizacao == 'mef' else self.calcular_integral(source)
+        return float(np.dot(self.modelo_A.pesos_producao_numpy, phi))
 
     def descricao_discretizacao(self):
         if self.discretizacao == 'mef':
-            return ('MEF Galerkin P1: (K + M_a) phi = M_f phi/k, massa consistente; '
-                    'operadores locais fixos em PyTorch, restricao P^T e interpolacao linear.')
-        return ('MDF: stencil conservativo local em PyTorch; restricao full-weighting '
-                'e prolongamento por interpolacao linear.')
+            formulation = 'MEF P1: A=H^-1(K+M_a), F=H^-1 M_f, massa consistente (sem lumping). '
+        else:
+            formulation = 'MDF conservativo: difusao com media harmonica e fissao diagonal. '
+        return (formulation + 'Banco Conv1d fixo comum para A/F; mesmo ciclo V, '
+                'Jacobi, P linear e R=Hc^-1 P^T Hf. Precisao: ' + self.precisao + '.')
 
     @staticmethod
     def nome_metodo(metodo):
@@ -182,17 +185,18 @@ class SolverDifusaoAI4PDEs:
         inicio_operador = time.perf_counter()
         if self.discretizacao == 'mef':
             self.modelo_A = OperadorMEF1D(self.x, self.materiais,
-                                          self.cond_esquerda, self.cond_direita)
+                                          self.cond_esquerda, self.cond_direita, dtype=self.dtype)
         else:
             self.modelo_A = OperadorDifusao1D(self.D_arr, self.Sigma_a_arr, self.h,
-                                              self.cond_esquerda, self.cond_direita)
+                                              self.cond_esquerda, self.cond_direita,
+                                              x=self.x, materiais=self.materiais,
+                                              nuSigma_f_arr=self.nuSigma_f_arr, dtype=self.dtype)
         self.tempos_detalhados["tempo_montagem_operador_s"] += time.perf_counter() - inicio_operador
 
         inicio_hierarquia = time.perf_counter()
         self.solver_fonte_fixa = None
         if self.metodo_fonte == 'unet_multigrid':
-            factory = SolverFonteFixaMEF1D if self.discretizacao == 'mef' else SolverFonteFixaUNet1D
-            self.solver_fonte_fixa = factory(self.modelo_A, omega=self.omega_fonte,
+            self.solver_fonte_fixa = SolverFonteFixaUNet1D(self.modelo_A, omega=self.omega_fonte,
                                             amortecimento_unet=self.amortecimento_unet)
         self.tempos_detalhados["tempo_montagem_hierarquia_s"] += time.perf_counter() - inicio_hierarquia
         self._sincronizar()
@@ -248,7 +252,7 @@ class SolverDifusaoAI4PDEs:
         phi_tensor = self._tensor(phi_np)
         residuo_tensor = self._tensor(rhs) - self.modelo_A(phi_tensor)
         residuo = float(torch.linalg.vector_norm(residuo_tensor, ord=float('inf')).item())
-        norma_rhs = max(float(np.linalg.norm(rhs, ord=np.inf)), 1.0)
+        norma_rhs = max(float(np.linalg.norm(rhs, ord=np.inf)), torch.finfo(self.dtype).tiny)
         self.iteracoes_fonte_fixa.append(1)
         self.residuos_fonte_fixa.append(residuo)
         self.convergiu_fonte_fixa.append(True)
@@ -289,8 +293,7 @@ class SolverDifusaoAI4PDEs:
             self.phi_ref = None
     
     def normalizar_potencia(self, phi):
-        P_atual = 3.2e-11 * (self.integral_fissao(phi) if self.discretizacao == 'mef'
-                            else np.sum(self.nuSigma_f_arr * phi * self.h))
+        P_atual = 3.2e-11 * self.integral_fissao(phi)
         if P_atual > 0:
             return phi * (self.potencia_nominal / P_atual)
         return phi
@@ -334,13 +337,11 @@ class SolverDifusaoAI4PDEs:
         self.criar_operador_A()
         self.calcular_referencias()
         n = self.N + 1
-        nuSigma_f = self.nuSigma_f_arr
         phi = np.ones(n)
-        if self.discretizacao == 'mef':
-            if self.cond_esquerda == 'vácuo':
-                phi[0] = 0.
-            if self.cond_direita == 'vácuo':
-                phi[-1] = 0.
+        if self.cond_esquerda == 'vácuo':
+            phi[0] = 0.
+        if self.cond_direita == 'vácuo':
+            phi[-1] = 0.
         k_eff = 1.0
         self.historico_k = []
         self.historico_phi = []
@@ -363,6 +364,7 @@ class SolverDifusaoAI4PDEs:
         print(f"Malha: {self.N} intervalos, h = {self.h:.4f} cm")
         print(f"Tipo: {'Homogêneo' if self.is_homogeneo else 'Heterogêneo'}")
         print(f"Método: {self.metodo_executado}")
+        print(f"Precisao comum: {self.precisao}")
         print(f"Dispositivo: {self.nome_dispositivo}")
         if self.k_ref:
             print(f"k_ref: {self.k_ref:.8f} ({self.fonte_ref})")
@@ -373,9 +375,12 @@ class SolverDifusaoAI4PDEs:
         for iteracao in range(1, self.max_iter + 1):
             inicio_iter = time.perf_counter()
             inicio_preparacao = time.perf_counter()
-            S = self.fonte_fissao(phi) / k_eff
-            self.tempos_detalhados['tempo_preparacao_fonte_s'] += time.perf_counter()-inicio_preparacao
-            S_tensor = self._tensor(S)
+            transf_antes = self.tempos_detalhados['tempo_transferencia_numpy_torch_s']
+            S_tensor = self.fonte_fissao(self._tensor(phi)) / k_eff
+            self._sincronizar()
+            transf_preparacao = self.tempos_detalhados['tempo_transferencia_numpy_torch_s'] - transf_antes
+            self.tempos_detalhados['tempo_preparacao_fonte_s'] += max(
+                0., time.perf_counter()-inicio_preparacao-transf_preparacao)
 
             inicio_fonte = time.perf_counter()
             transf_antes = (self.tempos_detalhados['tempo_transferencia_numpy_torch_s']
@@ -492,6 +497,11 @@ class SolverDifusaoAI4PDEs:
             "Discretizacao": self.discretizacao.upper(),
             "Nos": self.N + 1,
             "Precisao": str(self.dtype),
+            "Ciclo": "V" if self.solver_fonte_fixa is not None else "nao se aplica",
+            "Niveis": len(self.solver_fonte_fixa.operadores) if self.solver_fonte_fixa is not None else 0,
+            "Pre_suavizacoes": self.solver_fonte_fixa.pre_suavizacoes if self.solver_fonte_fixa is not None else 0,
+            "Post_suavizacoes": self.solver_fonte_fixa.post_suavizacoes if self.solver_fonte_fixa is not None else 0,
+            "Suavizacoes_grosso": self.solver_fonte_fixa.suavizacoes_grosso if self.solver_fonte_fixa is not None else 0,
             "Método": self.nome_metodo(self.metodo_fonte),
             "N": self.N,
             "k_eff": self.k_eff,

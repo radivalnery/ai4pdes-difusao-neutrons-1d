@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -9,6 +11,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from neutron_ai4pdes.solver import SolverDifusaoAI4PDEs
+
+
+@pytest.fixture(scope='module', autouse=True)
+def uma_thread_para_validacao():
+    before = torch.get_num_threads()
+    torch.set_num_threads(1)
+    yield
+    torch.set_num_threads(before)
 
 
 def cfg_homogeneo(N=100, max_iter=1000, max_iter_fonte=5000):
@@ -55,16 +65,27 @@ def cfg_heterogeneo(N=300, max_iter=1000, max_iter_fonte=5000):
 
 @pytest.mark.slow
 def test_homogeneo_regressao_keff_unet_multigrid():
-    solver = SolverDifusaoAI4PDEs(**cfg_homogeneo(), metodo_fonte="unet_multigrid")
+    cfg = cfg_homogeneo()
+    cfg.update(tol_k=1e-9, tol_phi=1e-8, tol_fonte=1e-10)
+    solver = SolverDifusaoAI4PDEs(**cfg, metodo_fonte="unet_multigrid")
     solver.resolver()
-    assert abs(solver.k_eff - 0.99724257) < 1e-5
+    # Autovalor EXATO da matriz MDF uniforme, nao um numero do solver anterior.
+    expected = .0681/(.065 + .9*4/solver.h**2*np.sin(np.pi/(4*solver.N))**2)
+    assert solver.convergiu and all(solver.convergiu_fonte_fixa)
+    assert solver.k_eff == pytest.approx(expected, abs=2e-8)
 
 
 @pytest.mark.slow
 def test_heterogeneo_regressao_keff_unet_multigrid():
-    solver = SolverDifusaoAI4PDEs(**cfg_heterogeneo(), metodo_fonte="unet_multigrid")
+    cfg = cfg_heterogeneo()
+    cfg.update(tol_k=1e-9, tol_phi=1e-8, tol_fonte=1e-10)
+    solver = SolverDifusaoAI4PDEs(**cfg, metodo_fonte="unet_multigrid")
     solver.resolver()
-    assert abs(solver.k_eff - 1.09508219) < 1e-5
+    classical = SolverDifusaoAI4PDEs(**cfg, metodo_fonte='thomas', permitir_thomas_comparacao=True)
+    classical.resolver()
+    assert solver.convergiu and classical.convergiu
+    assert solver.k_eff == pytest.approx(classical.k_eff, abs=2e-8)
+    assert solver.k_eff == pytest.approx(1.09506, rel=1e-4)
 
 
 def test_unet_multigrid_e_thomas_keff_proximos():

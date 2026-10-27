@@ -155,6 +155,7 @@ def executar_solver_artigo(caso_id, caso_cfg, N, metodo, args):
         guardar_historicos_fonte=False,
         permitir_thomas_comparacao=permitir_thomas,
         discretizacao=args.discretizacao,
+        precisao=args.precisao,
     )
     solver.resolver(metodo_fonte=metodo)
     resumo = solver.resumo_resultado(caso_cfg["nome"])
@@ -322,7 +323,8 @@ def gerar_relatorio_experimental(caminhos, resultados, comparacoes, refinamento,
         "Escopo: comparação enxuta entre Neural Physics/U-Net multigrid, Thomas e referência Couto (2003) no caso heterogêneo.",
         'Discretizacao: ' + caminhos.get('discretizacao', '') + '. N = intervalos/elementos; nos = N+1.',
         'MEF: Galerkin P1 com massa consistente. Vacuo significa fluxo nulo na fronteira.',
-        'Precisao: MDF float32; MEF float64. Os tempos nao isolam o efeito da discretizacao.',
+        'Precisao comum: ' + caminhos.get('precisao', 'float64') + '. Mesmo banco Conv1d, ciclo V, malhas e transferencias para MDF/MEF.',
+        'MEF: A=H^-1(K+M_a), F=H^-1 M_f; R=Hc^-1 P^T Hf para ambos. A massa permanece consistente.',
         'As colunas convergiu_np e convergiu_thomas dos CSVs identificam resultados sem convergencia.',
         "",
         "## Comparações principais",
@@ -358,21 +360,27 @@ def gerar_relatorio_experimental(caminhos, resultados, comparacoes, refinamento,
         story.append(Paragraph("Escopo: Neural Physics/U-Net multigrid, Thomas e Couto (2003).", normal))
         story.append(Paragraph('Discretizacao: ' + caminhos.get('discretizacao', '')
                                + '. N = intervalos/elementos; nos = N+1. MEF: Galerkin P1, massa consistente.', normal))
-        story.append(Paragraph('Precisao: MDF float32; MEF float64. Tempos nao isolam o efeito da discretizacao. '
+        story.append(Paragraph('Precisao comum: ' + caminhos.get('precisao', 'float64') + '. Mesmo banco Conv1d, ciclo V e transferencias. '
                                'Consulte nos CSVs os indicadores de convergencia antes de usar os resultados.', normal))
+        story.append(Paragraph('MEF: A=H^-1(K+M_a), F=H^-1 M_f, sem lumping. Para ambos, R=Hc^-1 P^T Hf. '
+                               'Ciclo V: ate 6 niveis, 2 passos pre/pos e 20 passos Jacobi no grosso; sem solver direto.', normal))
         story.append(Spacer(1, 0.3*cm))
         story.append(Paragraph("Comparações principais", h2))
         data = [["Caso", "N", "k NP", "k Thomas", "erro k", "phi inf", "phi L2", "Conv."]]
         for r in comparacoes:
             data.append([r['caso_id'], r['N'], f"{r['k_np']:.8f}", f"{r['k_thomas']:.8f}", f"{r['erro_k_np_thomas']:.2e}", f"{r['erro_fluxo_inf_np_thomas']:.2e}", f"{r['erro_fluxo_l2_np_thomas']:.2e}", 'sim' if r['convergiu_np'] and r['convergiu_thomas'] else 'NAO'])
-        tbl = Table(data, repeatRows=1)
+        largura = A4[0] - 3.2*cm
+        tbl = Table(data, repeatRows=1,
+                    colWidths=[largura*w for w in (.16,.04,.12,.12,.12,.12,.12,.08)])
         tbl.setStyle(TableStyle([
             ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
             ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
             ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('LEFTPADDING', (0,0), (-1,-1), 3),
+            ('RIGHTPADDING', (0,0), (-1,-1), 3),
         ]))
         story.append(tbl)
-        story.append(Spacer(1, 0.3*cm))
+        story.append(PageBreak())
         story.append(Paragraph("Tempos separados", h2))
         data_tempo = [["Caso", "N", "Método", "Mont.", "Transf.", "Iter.", "Fonte", "Total"]]
         for r in comparacoes:
@@ -392,11 +400,14 @@ def gerar_relatorio_experimental(caminhos, resultados, comparacoes, refinamento,
                 f"{r['tempo_thomas_fonte_fixa_s']:.3f}",
                 f"{r['tempo_thomas_s']:.3f}",
             ])
-        tbl_tempo = Table(data_tempo, repeatRows=1)
+        tbl_tempo = Table(data_tempo, repeatRows=1,
+                          colWidths=[largura*w for w in (.16,.04,.14,.132,.132,.132,.132,.132)])
         tbl_tempo.setStyle(TableStyle([
             ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
             ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
             ('FONTSIZE', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 3),
+            ('RIGHTPADDING', (0,0), (-1,-1), 3),
         ]))
         story.append(tbl_tempo)
         story.append(PageBreak())
@@ -421,6 +432,7 @@ def executar_experimento_artigo(args):
         return executar_duas_discretizacoes(args)
     caminhos = criar_estrutura_saida(args.saida)
     caminhos['discretizacao'] = args.discretizacao.upper()
+    caminhos['precisao'] = args.precisao
     hardware = registrar_hardware(caminhos)
     with open(os.path.join(caminhos['base'], 'configuracao.json'), 'w', encoding='utf-8') as f:
         json.dump({'parametros': vars(args), 'problemas': problemas_artigo()}, f, indent=2, ensure_ascii=False)
@@ -449,7 +461,8 @@ def executar_experimento_artigo(args):
                     historico_keff.append({"caso_id": caso_id, "discretizacao": args.discretizacao, "N": N, "metodo": metodo, "iteracao": i, "k_eff": float(k)})
                 for i, (it_fonte, res_fonte, conv) in enumerate(zip(solver.iteracoes_fonte_fixa, solver.residuos_fonte_fixa, solver.convergiu_fonte_fixa), start=1):
                     historico_residuo.append({"caso_id": caso_id, "discretizacao": args.discretizacao, "N": N, "metodo": metodo, "chamada_fonte": i, "iteracoes_fonte": int(it_fonte), "residuo_final": float(res_fonte), "convergiu": bool(conv)})
-                tr = {"caso_id": caso_id, "discretizacao": args.discretizacao, "N": N, "metodo": metodo}
+                tr = {"caso_id": caso_id, "discretizacao": args.discretizacao,
+                      "precisao": args.precisao, "N": N, "metodo": metodo}
                 tr.update(solver.tempos_detalhados)
                 tempos.append(tr)
 
@@ -467,6 +480,7 @@ def executar_experimento_artigo(args):
         linha = {
             "caso_id": caso_id,
             "discretizacao": args.discretizacao,
+            "precisao": np_solver.precisao,
             "N": N,
             "k_np": float(np_solver.k_eff),
             "k_thomas": float(th_solver.k_eff),
@@ -560,6 +574,7 @@ def executar_duas_discretizacoes(args):
     todos_resultados = [row for campanha in campanhas for row in campanha['_resultados']]
     todas_figuras = [item for campanha in campanhas for item in campanha['_figuras']]
     caminhos['discretizacao'] = 'MDF + MEF'
+    caminhos['precisao'] = args.precisao
     gerar_relatorio_experimental(caminhos, todos_resultados, todas_cmp, todas_cmp, todas_figuras)
     gerar_tabelas_latex(caminhos, todas_cmp, todas_cmp)
     with open(os.path.join(caminhos['relatorios'], 'indice.md'), 'w', encoding='utf-8') as f:
@@ -576,6 +591,8 @@ def construir_parser():
     grupo.add_argument("--experimento-artigo", action="store_true", help="executa o pacote experimental sem GUI")
     parser.add_argument('--discretizacao', choices=['mdf', 'mef', 'ambos'], default='mdf',
                         help='MDF ou MEF P1; ambos executa e consolida duas campanhas')
+    parser.add_argument('--precisao', choices=['float64', 'float32'], default='float64',
+                        help='mesma precisao para MDF e MEF (padrao float64)')
     parser.add_argument("--saida", default="resultados_artigo_v4_2", help="pasta de saída dos resultados")
     parser.add_argument("--malhas-homogeneo", default="1,13,26,52,100,104", help="lista de N para o caso homogêneo, separada por vírgulas")
     parser.add_argument("--malhas-heterogeneo", default="3,12,48,96,192,300,384", help="lista de N para o caso heterogêneo, separada por vírgulas")
@@ -613,6 +630,7 @@ def main():
     app = DifusaoGUI_AI4PDEs(root)
     if args.discretizacao != 'ambos':
         app.discretizacao_var.set(args.discretizacao.upper())
+    app.precisao_var.set(args.precisao)
     root.mainloop()
 
 if __name__ == "__main__":

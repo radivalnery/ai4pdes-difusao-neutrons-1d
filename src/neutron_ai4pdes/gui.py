@@ -268,7 +268,11 @@ class DifusaoGUI_AI4PDEs:
             self.painel_controles, textvariable=self.discretizacao_var,
             values=['MDF', 'MEF'], state='readonly', width=16,
         )
-        self.discretizacao_combo.grid(row=row, column=1, columnspan=3, sticky=tk.W, padx=3)
+        self.discretizacao_combo.grid(row=row, column=1, sticky=tk.W, padx=3)
+        ttk.Label(self.painel_controles, text="Precisão:").grid(row=row, column=2, sticky=tk.W)
+        self.precisao_var = tk.StringVar(value='float64')
+        ttk.Combobox(self.painel_controles, textvariable=self.precisao_var,
+                     values=['float64', 'float32'], state='readonly', width=9).grid(row=row, column=3, padx=3)
         row += 1
         
         ttk.Label(self.painel_controles, text="Condições:", font=('Arial', 10, 'bold')).grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=3)
@@ -498,7 +502,8 @@ class DifusaoGUI_AI4PDEs:
 | c = Sigma_a (absorcao) ou nuSigma_f (fissao).                  |
 | Massa consistente; materiais integrados por elemento/regiao.   |
 | Reflexiva: corrente nula natural. Vacuo: fluxo nulo.            |
-| Multigrid: operadores MEF, restricao P^T e interpolacao P.      |
+| A/F por Conv1d fixa; MEF escalonado por H^-1, sem lumping.      |
+| Mesmo ciclo V e R=Hc^-1 P^T Hf nas duas discretizacoes.         |
 | Thomas verifica o mesmo sistema e nao entra no ciclo V.        |
 +----------------------------------------------------------------+
 
@@ -852,6 +857,7 @@ class DifusaoGUI_AI4PDEs:
         return {
             "L": L,
             "discretizacao": self.discretizacao_var.get().lower(),
+            "precisao": self.precisao_var.get(),
             "N": N,
             "materiais": [dict(m) for m in self.materiais_atual],
             "cond_esquerda": esquerda,
@@ -994,6 +1000,7 @@ class DifusaoGUI_AI4PDEs:
             N_list = self.obter_lista_N_tabela()
             materiais = [dict(m) for m in self.materiais_atual]
             discretizacao_tabela = self.discretizacao_var.get().lower()
+            precisao_tabela = self.precisao_var.get()
             metodo_tabela = self.metodo_fonte_var.get()
             if metodo_tabela == "ambos":
                 metodo_tabela = "unet_multigrid"
@@ -1039,6 +1046,7 @@ class DifusaoGUI_AI4PDEs:
                         tol_fonte=tol_fonte,
                         max_iter_fonte=max_iter_fonte,
                         discretizacao=discretizacao_tabela,
+                        precisao=precisao_tabela,
                         metodo_fonte=metodo_tabela
                     )
                     k_eff, phi = solver.resolver(metodo_fonte=metodo_tabela)
@@ -1048,6 +1056,7 @@ class DifusaoGUI_AI4PDEs:
                     resultado = {
                         'N': N,
                         'discretizacao': solver.discretizacao.upper(),
+                        'precisao': solver.precisao,
                         'nos': N + 1,
                         'k_eff': k_eff,
                         'iteracoes': solver.iteracoes_totais,
@@ -1553,7 +1562,9 @@ class DifusaoGUI_AI4PDEs:
                 ["Máx. iterações fonte fixa (solver principal)", f"{self.solver.max_iter_fonte}"],
                 ["Omega fonte fixa", f"{self.solver.omega_fonte:.3f}"],
                 ["Fator de relaxação da correção multigrid", f"{self.solver.amortecimento_unet:.3f}"],
-                ["Método", "Neural Physics: operador conservativo local em PyTorch + U-Net/multigrid"],
+                ["Método", "Neural Physics: stencils locais por banco Conv1d fixo + U-Net/multigrid"],
+                ["Transferências", "P linear; R=Hc^-1 P^T Hf (mesmas rotinas MDF/MEF)"],
+                ["Ciclo / suavização", "V; 2 pré, 2 pós, 20 Jacobi no grosso; até 6 níveis"],
                 ["Pesos treináveis", "Não"],
                 ["Relação com AI4PDEs", "Adaptação 1D local da filosofia do pacote"]
             ]

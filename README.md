@@ -48,8 +48,12 @@ python main.py --experimento-artigo --discretizacao mef --malhas-homogeneo 13 --
 ```
 
 Os CSVs registram convergencia, discretizacao, precisao e tempos separados.
-MDF preserva float32 da v4.1; MEF usa float64. A comparacao temporal mede estas
-implementacoes e precisoes, nao exclusivamente a diferenca MDF/MEF.
+MDF e MEF agora usam o **mesmo banco Conv1d fixo, ciclo V, hierarquia geometrica,
+transferencias e precisao** (float64 por padrao; `--precisao float32` para ambos).
+Mudam os coeficientes de A/F: MDF conservativo ou MEF P1 de massa consistente.
+O escalonamento H^-1 do MEF permite uma convencao comum de residuos sem
+alterar o problema de autovalor nem concentrar a massa. A mesma tolerancia
+nao implica o mesmo erro de discretizacao ou o mesmo numero de ciclos.
 Fonte fixa e uma parcela do tempo de iteracao: nao some as duas colunas.
 
 As versoes unicas v4.0/v4.1 permanecem preservadas. O estado MDF anterior ao
@@ -92,7 +96,8 @@ src/neutron_ai4pdes/
   gui.py                        frontend Tkinter, graficos e relatorio
   solver.py                     backend numerico do problema de autovalor
   models.py                     operador discreto e solver de fonte fixa
-  fem.py                        MEF P1, massa consistente e multigrid MEF
+  stencils.py                   banco Conv1d e transferencias comuns MDF/MEF
+  fem.py                        montagem MEF P1, massa consistente
   metrics.py                    erros globais de forma do fluxo
   experiments.py                campanhas sem GUI e exportacao para artigo
   references.py                 formulas e solucoes de referencia

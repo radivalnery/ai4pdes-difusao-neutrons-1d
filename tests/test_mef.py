@@ -44,15 +44,15 @@ def test_matrizes_elementares_consistentes():
     mass = 2/6 * np.array([[2., 1.], [1., 2.]])
     np.testing.assert_allclose(dense(op), stiffness+.2*mass, atol=1e-14)
     np.testing.assert_allclose(op.aplicar_fissao_numpy(np.array([.4, .7])), .3*mass@np.array([.4, .7]))
-    assert list(op.parameters()) == []
+    assert all(not p.requires_grad for p in op.parameters())
 
 
 def test_material_cortando_elemento_e_integrado_sem_media_nodal():
     mats = [dict(inicio=0., fim=.4, D=1., Sigma_a=0., nuSigma_f=.2),
             dict(inicio=.4, fim=1., D=3., Sigma_a=0., nuSigma_f=.5)]
     op = OperadorMEF1D([0., 1.], mats, 'reflexiva', 'reflexiva')
-    np.testing.assert_allclose(dense(op), 2.2*np.array([[1., -1.], [-1., 1.]]))
-    assert np.sum(op.aplicar_fissao_numpy(np.ones(2))) == pytest.approx(.4*.2+.6*.5)
+    np.testing.assert_allclose(op.medida.numpy()[:, None]*dense(op), 2.2*np.array([[1., -1.], [-1., 1.]]))
+    assert np.dot(op.medida.numpy(), op.aplicar_fissao_numpy(np.ones(2))) == pytest.approx(.4*.2+.6*.5)
 
 
 def test_transferencias_adjuntas_e_geometria_impar():
@@ -66,7 +66,8 @@ def test_transferencias_adjuntas_e_geometria_impar():
         np.testing.assert_allclose(transfer.prolongar(coarse.x).numpy(), fine.x.numpy())
         a = torch.linspace(.2, .9, len(fine.x), dtype=torch.float64)
         b = torch.linspace(.1, .7, len(coarse.x), dtype=torch.float64)
-        assert torch.dot(a, transfer.prolongar(b)).item() == pytest.approx(torch.dot(transfer.restringir(a), b).item())
+        assert torch.dot(fine.medida*a, transfer.prolongar(b)).item() == pytest.approx(
+            torch.dot(coarse.medida*transfer.restringir(a), b).item())
 
 
 @pytest.mark.parametrize('caso,N', [('homogeneo', 104), ('heterogeneo', 384)])
@@ -132,11 +133,14 @@ def test_refinamento_mef_aproxima_analitico_com_ordem_dois():
     assert errors[1]/errors[2] > 3.8
 
 
-def test_thomas_proibido_no_ciclo_multigrid(monkeypatch):
+@pytest.mark.parametrize('discretizacao', ['mdf', 'mef'])
+def test_thomas_proibido_no_ciclo_multigrid(monkeypatch, discretizacao):
     def proibido(*args, **kwargs):
         raise AssertionError('Thomas foi chamado dentro do caminho principal')
     monkeypatch.setattr('neutron_ai4pdes.solver.resolver_tridiagonal_thomas', proibido)
-    solver = SolverDifusaoAI4PDEs(**config(N=26))
+    cfg = config(N=26)
+    cfg['discretizacao'] = discretizacao
+    solver = SolverDifusaoAI4PDEs(**cfg)
     solver.resolver()
     assert solver.convergiu and len(solver.solver_fonte_fixa.operadores) > 1
     with pytest.raises(RuntimeError, match='referencia'):
